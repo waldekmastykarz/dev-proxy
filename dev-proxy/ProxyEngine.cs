@@ -436,7 +436,7 @@ public class ProxyEngine
         var psi = new ProcessStartInfo
         {
             FileName = "lsof",
-            Arguments = $"-i :{e.ClientRemoteEndPoint.Port}",
+            Arguments = $"-i :{e.ClientRemoteEndPoint?.Port}",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             CreateNoWindow = true
@@ -450,7 +450,7 @@ public class ProxyEngine
         proc.WaitForExit();
 
         var lines = output.Split(new[] { Environment.NewLine }, StringSplitOptions.RemoveEmptyEntries);
-        var matchingLine = lines.FirstOrDefault(l => l.Contains($"{e.ClientRemoteEndPoint.Port}->"));
+        var matchingLine = lines.FirstOrDefault(l => l.Contains($"{e.ClientRemoteEndPoint?.Port}->"));
         if (matchingLine is null)
         {
             return -1;
@@ -530,7 +530,7 @@ public class ProxyEngine
                 await e.GetRequestBodyAsString();
             }
 
-            using var scope = _logger.BeginScope(e.HttpClient.Request.Method, e.HttpClient.Request.Url, e.GetHashCode());
+            using var scope = _logger.BeginScope(e.HttpClient.Request.Method ?? "", e.HttpClient.Request.Url, e.GetHashCode());
 
             e.UserData = e.HttpClient.Request;
             _logger.LogRequest(new[] { $"{e.HttpClient.Request.Method} {e.HttpClient.Request.Url}" }, MessageType.InterceptedRequest, new LoggingContext(e));
@@ -608,7 +608,7 @@ public class ProxyEngine
                 return;
             }
 
-            using var scope = _logger.BeginScope(e.HttpClient.Request.Method, e.HttpClient.Request.Url, e.GetHashCode());
+            using var scope = _logger.BeginScope(e.HttpClient.Request.Method ?? "", e.HttpClient.Request.Url, e.GetHashCode());
 
             // necessary to make the response body available to plugins
             e.HttpClient.Response.KeepBody = true;
@@ -641,7 +641,7 @@ public class ProxyEngine
             // of mocked requests available to plugins
             e.HttpClient.Response.KeepBody = true;
 
-            using var scope = _logger.BeginScope(e.HttpClient.Request.Method, e.HttpClient.Request.Url, e.GetHashCode());
+            using var scope = _logger.BeginScope(e.HttpClient.Request.Method ?? "", e.HttpClient.Request.Url, e.GetHashCode());
 
             var message = $"{e.HttpClient.Request.Method} {e.HttpClient.Request.Url}";
             _logger.LogRequest([message], MessageType.InterceptedResponse, new LoggingContext(e));

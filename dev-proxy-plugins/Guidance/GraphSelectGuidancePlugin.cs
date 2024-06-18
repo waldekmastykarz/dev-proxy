@@ -31,7 +31,7 @@ public class GraphSelectGuidancePlugin : BaseProxyPlugin
         Request request = e.Session.HttpClient.Request;
         if (UrlsToWatch is not null &&
             e.HasRequestUrlMatch(UrlsToWatch) &&
-            e.Session.HttpClient.Request.Method.ToUpper() != "OPTIONS" &&
+            e.Session.HttpClient.Request.Method?.ToUpper() != "OPTIONS" &&
             WarnNoSelect(request))
             Logger.LogRequest(BuildUseSelectMessage(request), MessageType.Warning, new LoggingContext(e.Session));
 

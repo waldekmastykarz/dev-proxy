@@ -28,7 +28,7 @@ public class ODSPSearchGuidancePlugin : BaseProxyPlugin
         Request request = e.Session.HttpClient.Request;
         if (UrlsToWatch is not null &&
             e.HasRequestUrlMatch(UrlsToWatch) &&
-            e.Session.HttpClient.Request.Method.ToUpper() != "OPTIONS" &&
+            e.Session.HttpClient.Request.Method?.ToUpper() != "OPTIONS" &&
             WarnDeprecatedSearch(request))
             Logger.LogRequest(BuildUseGraphSearchMessage(), MessageType.Warning, new LoggingContext(e.Session));
 

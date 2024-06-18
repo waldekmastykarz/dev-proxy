@@ -28,7 +28,7 @@ public class GraphBetaSupportGuidancePlugin : BaseProxyPlugin
         Request request = e.Session.HttpClient.Request;
         if (UrlsToWatch is not null &&
             e.HasRequestUrlMatch(UrlsToWatch) &&
-            e.Session.HttpClient.Request.Method.ToUpper() != "OPTIONS" &&
+            e.Session.HttpClient.Request.Method?.ToUpper() != "OPTIONS" &&
             ProxyUtils.IsGraphBetaRequest(request))
             Logger.LogRequest(BuildBetaSupportMessage(request), MessageType.Warning, new LoggingContext(e.Session));
         return Task.CompletedTask;

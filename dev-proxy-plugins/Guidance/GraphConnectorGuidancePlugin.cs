@@ -45,7 +45,7 @@ public class GraphConnectorGuidancePlugin : BaseProxyPlugin
     {
         if (UrlsToWatch is null ||
           !e.HasRequestUrlMatch(UrlsToWatch) ||
-          e.Session.HttpClient.Request.Method.ToUpper() != "PATCH")
+          e.Session.HttpClient.Request.Method?.ToUpper() != "PATCH")
         {
             return Task.CompletedTask;
         }

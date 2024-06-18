@@ -320,7 +320,7 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
             }
 
             if (!_configuration.IncludeOptionsRequests &&
-                request.Context.Session.HttpClient.Request.Method.ToUpperInvariant() == "OPTIONS")
+                request.Context.Session.HttpClient.Request.Method?.ToUpperInvariant() == "OPTIONS")
             {
                 Logger.LogDebug("Skipping OPTIONS request {url}...", request.Context.Session.HttpClient.Request.RequestUri);
                 continue;
@@ -474,7 +474,7 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         var resource = GetLastNonTokenSegment(request.RequestUri.Segments);
         var path = new OpenApiPathItem();
 
-        var method = request.Method.ToUpperInvariant() switch
+        var method = request.Method?.ToUpperInvariant() switch
         {
             "DELETE" => OperationType.Delete,
             "GET" => OperationType.Get,
