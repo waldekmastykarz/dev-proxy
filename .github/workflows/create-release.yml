@@ -162,8 +162,6 @@ jobs:
     steps:
       - name: Set version
         run: echo "DEVPROXY_VERSION=${GITHUB_REF_NAME:1}" >> $GITHUB_ENV
-      - name: Checkout repository
-        uses: actions/checkout@v4
       # Required for multi-platform images
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
@@ -193,7 +191,7 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}:${{ env.DEVPROXY_VERSION }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}:latest
-          labels: ${{ steps.meta.outputs.labels }}
+          # labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
           build-args: |
             DEVPROXY_VERSION=${{ env.DEVPROXY_VERSION }}
