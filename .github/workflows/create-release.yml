@@ -190,7 +190,9 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}:${{ env.DEVPROXY_VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}:latest
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
           build-args: |
@@ -203,7 +205,9 @@ jobs:
           context: .
           file: ./Dockerfile_beta
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}:${{ env.DEVPROXY_VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}:beta
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
           build-args: |
