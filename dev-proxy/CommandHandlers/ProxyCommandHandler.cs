@@ -6,6 +6,7 @@ using DevProxy.Abstractions;
 using Microsoft.VisualStudio.Threading;
 using System.CommandLine;
 using System.CommandLine.Invocation;
+using System.Net;
 
 namespace DevProxy.CommandHandlers;
 
@@ -25,7 +26,7 @@ public class ProxyCommandHandler(IPluginEvents pluginEvents,
     {
         var joinableTaskContext = new JoinableTaskContext();
         var joinableTaskFactory = new JoinableTaskFactory(joinableTaskContext);
-        
+
         return joinableTaskFactory.Run(async () => await InvokeAsync(context));
     }
 
@@ -40,7 +41,7 @@ public class ProxyCommandHandler(IPluginEvents pluginEvents,
             var builder = WebApplication.CreateBuilder();
             builder.Logging.AddFilter("Microsoft.Hosting.*", LogLevel.Error);
             builder.Logging.AddFilter("Microsoft.AspNetCore.*", LogLevel.Error);
-            
+
             // API controller is registered first and so is the last service to be disposed of when the app is shutdown
             builder.Services.AddControllers();
 
@@ -59,10 +60,12 @@ public class ProxyCommandHandler(IPluginEvents pluginEvents,
                 options.LowercaseUrls = true;
             });
 
+            var ipAddress = context.ParseResult.GetValueForOption<string?>(ProxyHost.IpAddressOptionName, _options);
+            ipAddress ??= "127.0.0.1";
             builder.WebHost.ConfigureKestrel(options =>
             {
-                options.ListenLocalhost(ConfigurationFactory.Value.ApiPort);
-                _logger.LogInformation("Dev Proxy API listening on http://localhost:{Port}...", ConfigurationFactory.Value.ApiPort);
+                options.Listen(IPAddress.Parse(ipAddress), ConfigurationFactory.Value.ApiPort);
+                _logger.LogInformation("Dev Proxy API listening on http://{IPAddress}:{Port}...", ipAddress, ConfigurationFactory.Value.ApiPort);
             });
 
             var app = builder.Build();
