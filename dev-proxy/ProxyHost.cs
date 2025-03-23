@@ -11,6 +11,12 @@ using System.Net;
 
 namespace DevProxy;
 
+internal enum OutputFormat
+{
+    Text,
+    Json
+}
+
 internal class ProxyHost
 {
     internal static readonly string PortOptionName = "--port";
@@ -321,6 +327,28 @@ internal class ProxyHost
             _discoverOption
         };
         command.Description = "Dev Proxy is a command line tool for testing Microsoft Graph, SharePoint Online and any other HTTP APIs.";
+        var outputOption = new Option<string>("--output", $"Output format. Allowed values: {string.Join(", ", Enum.GetNames<OutputFormat>())}")
+        
+        {
+            ArgumentHelpName = "output"
+        };
+        outputOption.AddAlias("-o");
+        outputOption.Arity = ArgumentArity.ZeroOrOne;
+        outputOption.SetDefaultValue("text");
+        outputOption.AddValidator(input =>
+        {
+            var value = input.GetValueForOption(outputOption);
+            if (string.IsNullOrEmpty(value))
+            {
+                return;
+            }
+
+            if (!Enum.TryParse<OutputFormat>(value, true, out _))
+            {
+                input.ErrorMessage = $"{value} is not a valid output format. Allowed values are: {string.Join(", ", Enum.GetNames<OutputFormat>())}";
+            }
+        });
+        command.AddGlobalOption(outputOption);
 
         var msGraphDbCommand = new Command("msgraphdb", "Generate a local SQLite database with Microsoft Graph API metadata")
         {

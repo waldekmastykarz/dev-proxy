@@ -17,18 +17,42 @@ PluginEvents pluginEvents = new();
 {
     var loggerFactory = LoggerFactory.Create(builder =>
     {
+        var jsonOutput = false;
+        var index = args.Index();
+        var outputOption = index.FirstOrDefault(i => i.Item == "--output" || i.Item == "-o");
+        if (outputOption.Item is not null)
+        {
+            var output = args.ElementAtOrDefault(outputOption.Index + 1);
+            if (output is not null && output == "json")
+            {
+                jsonOutput = true;
+            }
+        }
+
+        if (jsonOutput)
+        {
+            builder.AddJsonConsole(options =>
+                {
+                    options.IncludeScopes = true;
+                });
+        }
+        else
+        {
+            builder
+                .AddConsole(options =>
+                {
+                    options.FormatterName = ProxyConsoleFormatter.DefaultCategoryName;
+                    options.LogToStandardErrorThreshold = LogLevel.Warning;
+                })
+                .AddConsoleFormatter<ProxyConsoleFormatter, ProxyConsoleFormatterOptions>(options =>
+                {
+                    options.IncludeScopes = true;
+                    options.ShowSkipMessages = ProxyCommandHandler.Configuration.ShowSkipMessages;
+                    options.ShowTimestamps = ProxyCommandHandler.Configuration.ShowTimestamps;
+                });
+        }
+
         builder
-            .AddConsole(options =>
-            {
-                options.FormatterName = ProxyConsoleFormatter.DefaultCategoryName;
-                options.LogToStandardErrorThreshold = LogLevel.Warning;
-            })
-            .AddConsoleFormatter<ProxyConsoleFormatter, ProxyConsoleFormatterOptions>(options =>
-            {
-                options.IncludeScopes = true;
-                options.ShowSkipMessages = ProxyCommandHandler.Configuration.ShowSkipMessages;
-                options.ShowTimestamps = ProxyCommandHandler.Configuration.ShowTimestamps;
-            })
             .AddRequestLogger(pluginEvents)
             .SetMinimumLevel(ProxyHost.LogLevel ?? ProxyCommandHandler.Configuration.LogLevel);
     });
