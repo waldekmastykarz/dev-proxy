@@ -185,31 +185,31 @@ jobs:
         if: contains(matrix.architecture, 'win-')
         run: |
           $(Get-FileHash ./${{ env.release }}/dev-proxy-installer-${{ matrix.architecture }}-${{ github.ref_name }}.exe -Algorithm SHA256).Hash
-  create_release:
-    name: Create Release
-    needs: [publish_binaries]
-    environment:
-      name: gh_releases
-    runs-on: [windows-latest]
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
-        with:
-          path: output
-      - name: Release
-        uses: anton-yurchenko/git-release@ec9c5b5c36b27eaffc628785b9183eae54601200 # v6.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DRAFT_RELEASE: "false"
-          PRE_RELEASE: "false"
-          CHANGELOG_FILE: "CHANGELOG.md"
-          ALLOW_EMPTY_CHANGELOG: "true"
-        with:
-          args: |
-              output/binaries-*/*.zip
-              output/installer-*/*.exe
+  # create_release:
+  #   name: Create Release
+  #   needs: [publish_binaries]
+  #   environment:
+  #     name: gh_releases
+  #   runs-on: [windows-latest]
+  #   permissions:
+  #     contents: write
+  #   steps:
+  #     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+  #     - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+  #       with:
+  #         path: output
+  #     - name: Release
+  #       uses: anton-yurchenko/git-release@ec9c5b5c36b27eaffc628785b9183eae54601200 # v6.0.0
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #         DRAFT_RELEASE: "false"
+  #         PRE_RELEASE: "false"
+  #         CHANGELOG_FILE: "CHANGELOG.md"
+  #         ALLOW_EMPTY_CHANGELOG: "true"
+  #       with:
+  #         args: |
+  #             output/binaries-*/*.zip
+  #             output/installer-*/*.exe
   # deploy_docker:
   #   name: Publish Docker image
   #   runs-on: ubuntu-latest
