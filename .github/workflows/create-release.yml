@@ -67,7 +67,6 @@ jobs:
           Get-ChildItem -Filter *.runtimeconfig.json -Recurse | Remove-Item
           popd
       - name: Install Sign CLI tool
-        working-directory: ./${{ env.release }}
         run: dotnet tool install --tool-path . sign --version 0.9.1-beta.25181.2
       - name: Azure CLI Login
         uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
@@ -79,7 +78,7 @@ jobs:
         working-directory: ./${{ env.release }}
         shell: pwsh
         run: >
-          ./sign code azure-key-vault
+          ../sign code azure-key-vault
           **/dev*proxy*
           --publisher-name "Dev Proxy"
           --description "Simulate API failures, throttling, and chaos - all from your command line."
@@ -95,7 +94,6 @@ jobs:
         with:
           filename: '../${{ env.release }}.zip'
           directory: './${{ env.release }}'
-          exclusions: sign.exe
       - name: Release SHA256 hash
         run: |
           $(Get-FileHash ./${{ env.release }}.zip -Algorithm SHA256).Hash
@@ -106,11 +104,10 @@ jobs:
           path: ./${{ env.release }}.zip
       - name: Sign abstractions
         if: matrix.architecture == 'win-x64'
-        working-directory: ./${{ env.release }}
         shell: pwsh
         run: >
           ./sign code azure-key-vault
-          ../dev-proxy-abstractions/bin/Release/net9.0/devproxy*.dll
+          ./dev-proxy-abstractions/bin/Release/net9.0/dev-proxy-abstractions.dll
           --publisher-name "Dev Proxy"
           --description "Simulate API failures, throttling, and chaos - all from your command line."
           --description-url "https://aka.ms/devproxy"
@@ -167,7 +164,7 @@ jobs:
         working-directory: ./${{ env.release }}
         shell: pwsh
         run: >
-          ./sign code azure-key-vault
+          ../sign code azure-key-vault
           ./dev-proxy-installer-*.exe
           --publisher-name "Dev Proxy"
           --description "Simulate API failures, throttling, and chaos - all from your command line."
