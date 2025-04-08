@@ -12,6 +12,8 @@ jobs:
   publish_binaries:
     name: Publish binaries
     runs-on: [windows-latest]
+    environment:
+      name: gh_releases
     permissions:
       id-token: write
       contents: read
