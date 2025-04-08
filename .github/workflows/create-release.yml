@@ -21,10 +21,10 @@ jobs:
       matrix:
         architecture:
           - win-x64
-          # - win-x86
-          # - linux-x64
-          # - linux-arm64
-          # - osx-x64
+          - win-x86
+          - linux-x64
+          - linux-arm64
+          - osx-x64
     env:
       release: 'dev-proxy-${{ matrix.architecture }}-${{ github.ref_name }}'
     steps:
@@ -65,6 +65,8 @@ jobs:
           Get-ChildItem -Filter *.pdb -Recurse | Remove-Item
           Get-ChildItem -Filter *.deps.json -Recurse | Remove-Item
           Get-ChildItem -Filter *.runtimeconfig.json -Recurse | Remove-Item
+          Get-ChildItem -Filter *.staticwebassets.endpoints.json -Recurse | Remove-Item
+          Get-ChildItem -Filter web.config -Recurse | Remove-Item
           popd
       - name: Install Sign CLI tool
         run: dotnet tool install --tool-path . sign --version 0.9.1-beta.25181.2
@@ -88,7 +90,6 @@ jobs:
           --azure-key-vault-certificate "${{ secrets.DOTNET_CERTIFICATE_NAME }}"
           --azure-key-vault-url "${{ secrets.DOTNET_VAULT_URL }}"
           --timestamp-url http://timestamp.digicert.com
-          --verbosity Debug
       - name: Archive release ${{ env.release }}
         uses: thedoctor0/zip-release@a24011d8d445e4da5935a7e73c1f98e22a439464 # master
         with:
@@ -116,7 +117,6 @@ jobs:
           --azure-key-vault-certificate "${{ secrets.DOTNET_CERTIFICATE_NAME }}"
           --azure-key-vault-url "${{ secrets.DOTNET_VAULT_URL }}"
           --timestamp-url http://timestamp.digicert.com
-          --verbosity Debug
       - name: Archive abstractions
         if: matrix.architecture == 'win-x64'
         uses: thedoctor0/zip-release@a24011d8d445e4da5935a7e73c1f98e22a439464 # master
@@ -174,7 +174,6 @@ jobs:
           --azure-key-vault-certificate "${{ secrets.DOTNET_CERTIFICATE_NAME }}"
           --azure-key-vault-url "${{ secrets.DOTNET_VAULT_URL }}"
           --timestamp-url http://timestamp.digicert.com
-          --verbosity Debug
       - name: Upload Installer
         if: contains(matrix.architecture, 'win-')
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
