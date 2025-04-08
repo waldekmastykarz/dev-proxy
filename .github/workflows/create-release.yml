@@ -80,7 +80,7 @@ jobs:
         shell: pwsh
         run: >
           ./sign code azure-key-vault
-          **/devproxy*
+          **/dev*proxy*
           --publisher-name "Dev Proxy"
           --description "Simulate API failures, throttling, and chaos - all from your command line."
           --description-url "https://aka.ms/devproxy"
@@ -95,6 +95,7 @@ jobs:
         with:
           filename: '../${{ env.release }}.zip'
           directory: './${{ env.release }}'
+          exclusions: sign.exe
       - name: Release SHA256 hash
         run: |
           $(Get-FileHash ./${{ env.release }}.zip -Algorithm SHA256).Hash
@@ -109,7 +110,7 @@ jobs:
         shell: pwsh
         run: >
           ./sign code azure-key-vault
-          ./dev-proxy-abstractions/bin/Release/net9.0/devproxy*.dll
+          ../dev-proxy-abstractions/bin/Release/net9.0/devproxy*.dll
           --publisher-name "Dev Proxy"
           --description "Simulate API failures, throttling, and chaos - all from your command line."
           --description-url "https://aka.ms/devproxy"
