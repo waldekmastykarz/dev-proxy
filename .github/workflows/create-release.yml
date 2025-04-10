@@ -7,6 +7,8 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   IMAGE_DESCRIPTION: Dev Proxy is an API simulator that helps you effortlessly test your app beyond the happy path.
+  APP_PUBLISHER: Dev Proxy
+  APP_DESCRIPTION_URL: https://aka.ms/devproxy
 
 jobs:
   publish_binaries:
@@ -77,14 +79,15 @@ jobs:
           tenant-id: ${{ secrets.DOTNET_TENANT_ID }}
           allow-no-subscriptions: true
       - name: Sign binaries
+        if: contains(matrix.architecture, 'win-')
         working-directory: ./${{ env.release }}
         shell: pwsh
         run: >
           ../sign code azure-key-vault
           **/dev*proxy*
-          --publisher-name "Dev Proxy"
-          --description "Simulate API failures, throttling, and chaos - all from your command line."
-          --description-url "https://aka.ms/devproxy"
+          --publisher-name "${{ env.APP_PUBLISHER }}"
+          --description "${{ env.IMAGE_DESCRIPTION }}"
+          --description-url "${{ env.APP_DESCRIPTION_URL }}"
           --azure-key-vault-tenant-id "${{ secrets.DOTNET_TENANT_ID }}"
           --azure-key-vault-client-id "${{ secrets.DOTNET_APPLICATION_ID }}"
           --azure-key-vault-certificate "${{ secrets.DOTNET_CERTIFICATE_NAME }}"
@@ -110,9 +113,9 @@ jobs:
         run: >
           ./sign code azure-key-vault
           ./dev-proxy-abstractions/bin/Release/net9.0/dev-proxy-abstractions.dll
-          --publisher-name "Dev Proxy"
-          --description "Simulate API failures, throttling, and chaos - all from your command line."
-          --description-url "https://aka.ms/devproxy"
+          --publisher-name "${{ env.APP_PUBLISHER }}"
+          --description "${{ env.IMAGE_DESCRIPTION }}"
+          --description-url "${{ env.APP_DESCRIPTION_URL }}"
           --azure-key-vault-tenant-id "${{ secrets.DOTNET_TENANT_ID }}"
           --azure-key-vault-client-id "${{ secrets.DOTNET_APPLICATION_ID }}"
           --azure-key-vault-certificate "${{ secrets.DOTNET_CERTIFICATE_NAME }}"
@@ -168,9 +171,9 @@ jobs:
         run: >
           ../sign code azure-key-vault
           ./dev-proxy-installer-*.exe
-          --publisher-name "Dev Proxy"
-          --description "Simulate API failures, throttling, and chaos - all from your command line."
-          --description-url "https://aka.ms/devproxy"
+          --publisher-name "${{ env.APP_PUBLISHER }}"
+          --description "${{ env.IMAGE_DESCRIPTION }}"
+          --description-url "${{ env.APP_DESCRIPTION_URL }}"
           --azure-key-vault-tenant-id "${{ secrets.DOTNET_TENANT_ID }}"
           --azure-key-vault-client-id "${{ secrets.DOTNET_APPLICATION_ID }}"
           --azure-key-vault-certificate "${{ secrets.DOTNET_CERTIFICATE_NAME }}"
