@@ -3,12 +3,15 @@
 // See the LICENSE file in the project root for more information.
 
 using DevProxy.Abstractions.Proxy;
+using System.Collections.ObjectModel;
 
 namespace DevProxy.Proxy;
 
-interface IProxyState
+#pragma warning disable CA1515 // required for the API controller
+public interface IProxyState
+#pragma warning restore CA1515
 {
-    Dictionary<string, object> GlobalData { get; set; }
+    Dictionary<string, object> GlobalData { get; }
     bool IsRecording { get; set; }
-    List<RequestLog> RequestLogs { get; set; }
+    Collection<RequestLog> RequestLogs { get; }
 }

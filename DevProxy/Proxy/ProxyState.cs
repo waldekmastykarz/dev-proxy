@@ -4,13 +4,14 @@
 
 using DevProxy.Abstractions.Proxy;
 using DevProxy.Abstractions.Utils;
+using System.Collections.ObjectModel;
 
 namespace DevProxy.Proxy;
 
 sealed class ProxyState : IProxyState
 {
     public bool IsRecording { get; set; }
-    public List<RequestLog> RequestLogs { get; set; } = [];
+    public Collection<RequestLog> RequestLogs { get; set; } = [];
     public Dictionary<string, object> GlobalData { get; set; } = new() {
         { ProxyUtils.ReportsKey, new Dictionary<string, object>() }
     };

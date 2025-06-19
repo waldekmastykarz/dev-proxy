@@ -4,7 +4,9 @@
 
 namespace DevProxy.Proxy;
 
-interface IProxyStateController
+#pragma warning disable CA1515 // required for the API controller
+public interface IProxyStateController
+#pragma warning restore CA1515
 {
     IProxyState ProxyState { get; }
     void StartRecording();
