@@ -13,7 +13,9 @@ namespace DevProxy.ApiControllers;
 
 [ApiController]
 [Route("[controller]")]
-sealed class ProxyController(IProxyStateController proxyStateController, IProxyConfiguration proxyConfiguration) : ControllerBase
+#pragma warning disable CA1515 // required for the API controller
+public sealed class ProxyController(IProxyStateController proxyStateController, IProxyConfiguration proxyConfiguration) : ControllerBase
+#pragma warning restore CA1515
 {
     private readonly IProxyStateController _proxyStateController = proxyStateController;
     private readonly IProxyConfiguration _proxyConfiguration = proxyConfiguration;
@@ -52,7 +54,9 @@ sealed class ProxyController(IProxyStateController proxyStateController, IProxyC
     }
 
     [HttpPost("mockRequest")]
+#pragma warning disable CA1030
     public async Task RaiseMockRequestAsync()
+#pragma warning restore CA1030
     {
         await _proxyStateController.MockRequestAsync();
         Response.StatusCode = 202;

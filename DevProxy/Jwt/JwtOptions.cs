@@ -4,10 +4,12 @@
 
 namespace DevProxy.Jwt;
 
-sealed class JwtOptions
+#pragma warning disable CA1515 // required for the API controller
+public sealed class JwtOptions
+#pragma warning restore CA1515
 {
     public IEnumerable<string>? Audiences { get; set; }
-    public Dictionary<string, string>? Claims { get; set; }
+    public Dictionary<string, string>? Claims { get; init; }
     public string? Issuer { get; set; }
     public string? Name { get; set; }
     public IEnumerable<string>? Roles { get; set; }
