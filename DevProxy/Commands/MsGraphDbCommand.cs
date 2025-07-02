@@ -23,8 +23,8 @@ sealed class MsGraphDbCommand : Command
         SetAction(GenerateMsGraphDbAsync);
     }
 
-    private async Task GenerateMsGraphDbAsync(ParseResult parseResult)
+    private async Task GenerateMsGraphDbAsync(ParseResult parseResult, CancellationToken cancellationToken)
     {
-        _ = await MSGraphDbUtils.GenerateMSGraphDbAsync(_logger, false, context.GetCancellationToken());
+        _ = await MSGraphDbUtils.GenerateMSGraphDbAsync(_logger, false, cancellationToken);
     }
 }
