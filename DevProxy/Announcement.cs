@@ -22,7 +22,7 @@ static class Announcement
         }
     }
 
-    public static async Task<string?> GetAsync()
+    private static async Task<string?> GetAsync()
     {
         try
         {

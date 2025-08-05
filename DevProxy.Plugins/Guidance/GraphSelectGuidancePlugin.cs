@@ -2,19 +2,23 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using DevProxy.Abstractions.Data;
 using DevProxy.Abstractions.Proxy;
 using DevProxy.Abstractions.Plugins;
 using DevProxy.Abstractions.Utils;
 using Microsoft.Extensions.Logging;
-using Titanium.Web.Proxy.EventArguments;
 using System.Globalization;
+using Titanium.Web.Proxy.EventArguments;
 
 namespace DevProxy.Plugins.Guidance;
 
 public sealed class GraphSelectGuidancePlugin(
     ILogger<GraphSelectGuidancePlugin> logger,
-    ISet<UrlToWatch> urlsToWatch) : BasePlugin(logger, urlsToWatch)
+    ISet<UrlToWatch> urlsToWatch,
+    MSGraphDb msGraphDb) : BasePlugin(logger, urlsToWatch)
 {
+    private readonly MSGraphDb _msGraphDb = msGraphDb;
+
     public override string Name => nameof(GraphSelectGuidancePlugin);
 
     public override async Task InitializeAsync(InitArgs e, CancellationToken cancellationToken)
@@ -22,7 +26,7 @@ public sealed class GraphSelectGuidancePlugin(
         await base.InitializeAsync(e, cancellationToken);
 
         // let's not await so that it doesn't block the proxy startup
-        _ = MSGraphDbUtils.GenerateMSGraphDbAsync(Logger, true, cancellationToken);
+        _ = _msGraphDb.GenerateDbAsync(true, cancellationToken);
     }
 
     public override Task AfterResponseAsync(ProxyResponseArgs e, CancellationToken cancellationToken)
@@ -82,7 +86,7 @@ public sealed class GraphSelectGuidancePlugin(
 
         try
         {
-            var dbConnection = MSGraphDbUtils.MSGraphDbConnection;
+            var dbConnection = _msGraphDb.Connection;
             // lookup information from the database
             var selectEndpoint = dbConnection.CreateCommand();
             selectEndpoint.CommandText = "SELECT hasSelect FROM endpoints WHERE path = @path AND graphVersion = @graphVersion";

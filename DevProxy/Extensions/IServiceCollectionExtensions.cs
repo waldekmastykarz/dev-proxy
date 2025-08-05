@@ -3,6 +3,7 @@
 // See the LICENSE file in the project root for more information.
 
 using DevProxy;
+using DevProxy.Abstractions.Data;
 using DevProxy.Abstractions.LanguageModel;
 using DevProxy.Abstractions.Proxy;
 using DevProxy.Commands;
@@ -45,6 +46,7 @@ static class IServiceCollectionExtensions
             .AddSingleton<UpdateNotification>()
             .AddSingleton<ProxyEngine>()
             .AddSingleton<DevProxyCommand>()
+            .AddSingleton<MSGraphDb>()
             .AddHttpClient();
 
         _ = services.AddPlugins(configuration, options);
