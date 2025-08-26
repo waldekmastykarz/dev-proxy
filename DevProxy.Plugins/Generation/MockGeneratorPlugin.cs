@@ -7,7 +7,6 @@ using DevProxy.Abstractions.Plugins;
 using DevProxy.Abstractions.Proxy;
 using DevProxy.Abstractions.Utils;
 using DevProxy.Plugins.Mocking;
-using DevProxy.Plugins.Utils;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using Titanium.Web.Proxy.EventArguments;
@@ -34,7 +33,6 @@ public sealed class MockGeneratorPlugin(
 
         Logger.LogInformation("Creating mocks from recorded requests...");
 
-        var methodAndUrlComparer = new MethodAndUrlComparer();
         var mocks = new List<MockResponse>();
 
         foreach (var request in e.RequestLogs)
