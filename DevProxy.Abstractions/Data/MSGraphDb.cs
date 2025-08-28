@@ -65,7 +65,10 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
             }
 
             await CreateDbAsync(cancellationToken);
+
+            SetDbJournaling(false);
             await FillDataAsync(cancellationToken);
+            SetDbJournaling(true);
 
             _logger.LogInformation("Microsoft Graph database successfully updated");
 
@@ -107,6 +110,8 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
     {
         _logger.LogInformation("Filling database...");
 
+        await using var transaction = await Connection.BeginTransactionAsync(cancellationToken);
+
         var i = 0;
 
         foreach (var openApiDocument in _openApiDocuments)
@@ -120,9 +125,10 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
 
             var insertEndpoint = Connection.CreateCommand();
             insertEndpoint.CommandText = "INSERT INTO endpoints (path, graphVersion, hasSelect) VALUES (@path, @graphVersion, @hasSelect)";
-            _ = insertEndpoint.Parameters.Add(new("@path", null));
-            _ = insertEndpoint.Parameters.Add(new("@graphVersion", null));
-            _ = insertEndpoint.Parameters.Add(new("@hasSelect", null));
+            var pathParam = insertEndpoint.Parameters.Add(new("@path", null));
+            var graphVersionParam = insertEndpoint.Parameters.Add(new("@graphVersion", null));
+            var hasSelectParam = insertEndpoint.Parameters.Add(new("@hasSelect", null));
+            await insertEndpoint.PrepareAsync(cancellationToken);
 
             foreach (var path in document.Paths)
             {
@@ -142,13 +148,15 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
                 var hasSelect = getOperation.Parameters.Any(p => p.Name == "$select");
 
                 _logger.LogTrace("Inserting endpoint {GraphVersion}{Key} with hasSelect={HasSelect}...", graphVersion, path.Key, hasSelect);
-                insertEndpoint.Parameters["@path"].Value = path.Key;
-                insertEndpoint.Parameters["@graphVersion"].Value = graphVersion;
-                insertEndpoint.Parameters["@hasSelect"].Value = hasSelect;
+                pathParam.Value = path.Key;
+                graphVersionParam.Value = graphVersion;
+                hasSelectParam.Value = hasSelect;
                 _ = await insertEndpoint.ExecuteNonQueryAsync(cancellationToken);
                 i++;
             }
         }
+
+        await transaction.CommitAsync(cancellationToken);
 
         _logger.LogInformation("Inserted {EndpointCount} endpoints in the database", i);
     }
@@ -202,7 +210,8 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
 
             try
             {
-                var openApiDocument = await new OpenApiStreamReader().ReadAsync(file.OpenRead(), cancellationToken);
+                await using var fileStream = file.OpenRead();
+                var openApiDocument = await new OpenApiStreamReader().ReadAsync(fileStream, cancellationToken);
                 _openApiDocuments[version] = openApiDocument.OpenApiDocument;
 
                 _logger.LogDebug("Added OpenAPI file {FilePath} for {Version}", filePath, version);
@@ -211,6 +220,21 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
             {
                 _logger.LogError(ex, "Error loading OpenAPI file {FilePath}", filePath);
             }
+        }
+    }
+
+    private void SetDbJournaling(bool enabled)
+    {
+        using var command = Connection.CreateCommand();
+        if (enabled)
+        {
+            command.CommandText = "PRAGMA journal_mode = DELETE;";
+            _ = command.ExecuteNonQuery();
+        }
+        else
+        {
+            command.CommandText = "PRAGMA journal_mode = OFF;";
+            _ = command.ExecuteNonQuery();
         }
     }
 
