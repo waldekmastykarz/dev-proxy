@@ -7,6 +7,8 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Microsoft.OpenApi.Models;
 using Microsoft.OpenApi.Readers;
+using System.Net;
+using System.Net.Http.Headers;
 
 namespace DevProxy.Abstractions.Data;
 
@@ -49,14 +51,29 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
         try
         {
             var dbFileInfo = new FileInfo(MSGraphDbFilePath);
-            var modifiedToday = dbFileInfo.Exists && dbFileInfo.LastWriteTime.Date == DateTime.Now.Date;
+            var modifiedToday = IsModifiedToday(dbFileInfo);
             if (modifiedToday && skipIfUpdatedToday)
             {
-                _logger.LogInformation("Microsoft Graph database already updated today");
+                _logger.LogInformation("Microsoft Graph database has already been updated today");
                 return 1;
             }
 
-            await UpdateOpenAPIGraphFilesIfNecessaryAsync(appFolder, cancellationToken);
+            var (isApiModified, hasErrors) = await UpdateOpenAPIGraphFilesIfNecessaryAsync(appFolder, cancellationToken);
+
+            if (hasErrors)
+            {
+                _logger.LogWarning("Unable to update Microsoft Graph database");
+                return 1;
+            }
+
+            if (!isApiModified)
+            {
+                UpdateLastWriteTime(dbFileInfo);
+                _logger.LogDebug("Updated the last-write-time attribute of Microsoft Graph database {File}", dbFileInfo);
+                _logger.LogInformation("Microsoft Graph database is already up-to-date");
+                return 1;
+            }
+
             await LoadOpenAPIFilesAsync(appFolder, cancellationToken);
             if (_openApiDocuments.Count < 1)
             {
@@ -65,13 +82,9 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
             }
 
             await CreateDbAsync(cancellationToken);
-
-            SetDbJournaling(false);
             await FillDataAsync(cancellationToken);
-            SetDbJournaling(true);
 
-            _logger.LogInformation("Microsoft Graph database successfully updated");
-
+            _logger.LogInformation("Microsoft Graph database is successfully updated");
             return 0;
         }
         catch (Exception ex)
@@ -79,10 +92,11 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
             _logger.LogError(ex, "Error generating Microsoft Graph database");
             return 1;
         }
-
     }
 
-    private static string GetGraphOpenApiYamlFileName(string version) => $"graph-{version.Replace(".", "_", StringComparison.OrdinalIgnoreCase)}-openapi.yaml";
+    private static bool IsModifiedToday(FileInfo fileInfo) => fileInfo.Exists && fileInfo.LastWriteTime.Date == DateTime.Now.Date;
+
+    private static void UpdateLastWriteTime(FileInfo fileInfo) => fileInfo.LastWriteTime = DateTime.Now;
 
     private async Task CreateDbAsync(CancellationToken cancellationToken)
     {
@@ -109,6 +123,8 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
     private async Task FillDataAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Filling database...");
+
+        SetDbJournaling(false);
 
         await using var transaction = await Connection.BeginTransactionAsync(cancellationToken);
 
@@ -158,38 +174,86 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
 
         await transaction.CommitAsync(cancellationToken);
 
+        SetDbJournaling(true);
+
         _logger.LogInformation("Inserted {EndpointCount} endpoints in the database", i);
     }
 
-    private async Task UpdateOpenAPIGraphFilesIfNecessaryAsync(string folder, CancellationToken cancellationToken)
+    private async Task<(bool isApiUpdated, bool hasErrors)> UpdateOpenAPIGraphFilesIfNecessaryAsync(string folder, CancellationToken cancellationToken)
     {
         _logger.LogInformation("Checking for updated OpenAPI files...");
+
+        var isApiUpdated = false;
+        var hasErrors = false;
 
         foreach (var version in graphVersions)
         {
             try
             {
-                var file = new FileInfo(Path.Combine(folder, GetGraphOpenApiYamlFileName(version)));
-                _logger.LogDebug("Checking for updated OpenAPI file {File}...", file);
-                if (file.Exists && file.LastWriteTime.Date == DateTime.Now.Date)
+                var yamlFile = new FileInfo(Path.Combine(folder, GetGraphOpenApiYamlFileName(version)));
+                _logger.LogDebug("Checking for updated OpenAPI file {File}...", yamlFile);
+                if (IsModifiedToday(yamlFile))
                 {
-                    _logger.LogInformation("File {File} already updated today", file);
+                    _logger.LogInformation("File {File} has already been updated today", yamlFile);
                     continue;
                 }
 
-                var url = $"https://raw.githubusercontent.com/microsoftgraph/msgraph-metadata/master/openapi/{version}/openapi.yaml";
+                var url = GetOpenApiSpecUrl(version);
                 _logger.LogInformation("Downloading OpenAPI file from {Url}...", url);
 
-                var response = await _httpClient.GetStringAsync(url, cancellationToken);
-                await File.WriteAllTextAsync(file.FullName, response, cancellationToken);
-
-                _logger.LogDebug("Downloaded OpenAPI file from {Url} to {File}", url, file);
+                var etagFile = new FileInfo(Path.Combine(folder, GetGraphOpenApiEtagFileName(version)));
+                isApiUpdated |= await DownloadOpenAPIFileAsync(url, yamlFile, etagFile, cancellationToken);
             }
             catch (Exception ex)
             {
+                hasErrors = true;
                 _logger.LogError(ex, "Error updating OpenAPI files");
             }
         }
+        return (isApiUpdated, hasErrors);
+    }
+
+    private async Task<bool> DownloadOpenAPIFileAsync(string url, FileInfo yamlFile, FileInfo etagFile, CancellationToken cancellationToken)
+    {
+        var tag = string.Empty;
+        if (etagFile.Exists)
+        {
+            tag = await File.ReadAllTextAsync(etagFile.FullName, cancellationToken);
+        }
+
+        using var requestMessage = new HttpRequestMessage(HttpMethod.Get, url);
+        if (!string.IsNullOrWhiteSpace(tag))
+        {
+            requestMessage.Headers.IfNoneMatch.Add(new EntityTagHeaderValue(tag));
+        }
+
+        var response = await _httpClient.SendAsync(requestMessage, cancellationToken);
+
+        if (response.StatusCode == HttpStatusCode.NotModified)
+        {
+            UpdateLastWriteTime(yamlFile);
+            _logger.LogDebug("File {File} already up-to-date. Updated the last-write-time attribute", yamlFile);
+            return false;
+        }
+
+        // Save the new OpenAPI spec.
+        _ = response.EnsureSuccessStatusCode();
+        await using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        await using var fileStream = new FileStream(yamlFile.FullName,
+            new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write, Share = FileShare.None });
+        await contentStream.CopyToAsync(fileStream, cancellationToken);
+
+        if (response.Headers.ETag is not null)
+        {
+            await File.WriteAllTextAsync(etagFile.FullName, response.Headers.ETag.Tag, cancellationToken);
+        }
+        else
+        {
+            etagFile.Delete();
+        }
+
+        _logger.LogDebug("Downloaded OpenAPI file from {Url} to {File}", url, yamlFile);
+        return true;
     }
 
     private async Task LoadOpenAPIFilesAsync(string folder, CancellationToken cancellationToken)
@@ -237,6 +301,14 @@ public sealed class MSGraphDb(HttpClient httpClient, ILogger<MSGraphDb> logger) 
             _ = command.ExecuteNonQuery();
         }
     }
+
+    private static string GetOpenApiSpecUrl(string version) => $"https://raw.githubusercontent.com/microsoftgraph/msgraph-metadata/master/openapi/{version}/openapi.yaml";
+
+    private static string GetBaseGraphOpenApiFileName(string version) => $"graph-{version.Replace(".", "_", StringComparison.OrdinalIgnoreCase)}-openapi";
+
+    private static string GetGraphOpenApiYamlFileName(string version) => $"{GetBaseGraphOpenApiFileName(version)}.yaml";
+
+    private static string GetGraphOpenApiEtagFileName(string version) => $"{GetBaseGraphOpenApiFileName(version)}.etag.txt";
 
     public void Dispose()
     {
