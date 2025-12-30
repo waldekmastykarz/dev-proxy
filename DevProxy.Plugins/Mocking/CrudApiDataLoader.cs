@@ -33,7 +33,10 @@ internal sealed class CrudApiDataLoader(
         {
             var data = JArray.Parse(fileContents);
             _onDataLoaded(data);
-            Logger.LogInformation("Data for CRUD API loaded from {DataFile}", _configuration.DataFile);
+            Logger.LogInformation(
+                "Data for CRUD API loaded from {DataFile} for API {ApiFile}",
+                _configuration.DataFile,
+                _configuration.ApiFile);
         }
         catch (Exception ex)
         {
