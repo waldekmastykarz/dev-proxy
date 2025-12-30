@@ -402,4 +402,13 @@ public sealed class ApiCenterOnboardingPlugin(
             Logger.LogError("Failed to import API definition for {ApiDefinition}. Status: {Status}, reason: {Reason}", apiDefinitionId, res.StatusCode, resContent);
         }
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _apiCenterClient?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }

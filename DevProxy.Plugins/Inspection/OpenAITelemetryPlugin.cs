@@ -53,7 +53,7 @@ public sealed class OpenAITelemetryPlugin(
         logger,
         urlsToWatch,
         proxyConfiguration,
-        pluginConfigurationSection), IDisposable
+        pluginConfigurationSection)
 {
     private const string ActivitySourceName = "DevProxy.OpenAI";
     private const string OpenAISystem = "openai";
@@ -1008,11 +1008,15 @@ public sealed class OpenAITelemetryPlugin(
         };
     }
 
-    public void Dispose()
+    protected override void Dispose(bool disposing)
     {
-        _loader?.Dispose();
-        _activitySource?.Dispose();
-        _tracerProvider?.Dispose();
-        _meterProvider?.Dispose();
+        if (disposing)
+        {
+            _loader?.Dispose();
+            _activitySource?.Dispose();
+            _tracerProvider?.Dispose();
+            _meterProvider?.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }

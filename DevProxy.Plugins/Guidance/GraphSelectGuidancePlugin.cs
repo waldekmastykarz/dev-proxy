@@ -112,4 +112,13 @@ public sealed class GraphSelectGuidancePlugin(
         var sanitizedUrl = ProxyUtils.SanitizeUrl(absoluteUrl);
         return "/" + string.Join("", new Uri(sanitizedUrl).Segments.Skip(2).Select(Uri.UnescapeDataString));
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _msGraphDb?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }

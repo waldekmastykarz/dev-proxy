@@ -337,4 +337,13 @@ public sealed class RateLimitingPlugin(
             return r.RequestUri.Host;
         }
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _loader?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }

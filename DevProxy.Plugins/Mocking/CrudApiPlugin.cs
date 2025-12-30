@@ -615,4 +615,13 @@ public sealed class CrudApiPlugin(
         }
         return result;
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _loader?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }

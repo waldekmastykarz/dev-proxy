@@ -4,6 +4,7 @@
 
 using DevProxy;
 using DevProxy.Commands;
+using DevProxy.Proxy;
 using System.Net;
 
 static WebApplication BuildApplication(string[] args, DevProxyConfigOptions options)
@@ -32,15 +33,42 @@ static WebApplication BuildApplication(string[] args, DevProxyConfigOptions opti
 
     return app;
 }
+
+static async Task<int> RunProxyAsync(string[] args, DevProxyConfigOptions options)
+{
+    var app = BuildApplication(args, options);
+    try
+    {
+        var devProxyCommand = app.Services.GetRequiredService<DevProxyCommand>();
+        return await devProxyCommand.InvokeAsync(args, app);
+    }
+    finally
+    {
+        // Dispose the app to clean up all services (including FileSystemWatchers in BaseLoader)
+        await app.DisposeAsync();
+    }
+}
+
 _ = Announcement.ShowAsync();
 
 var options = new DevProxyConfigOptions();
 options.ParseOptions(args);
-var app = BuildApplication(args, options);
 
-var devProxyCommand = app.Services.GetRequiredService<DevProxyCommand>();
-var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
+int exitCode;
+do
+{
+    // Reset the restart flag before each run
+    ConfigFileWatcher.Reset();
+    exitCode = await RunProxyAsync(args, options);
 
-var exitCode = await devProxyCommand.InvokeAsync(args, app);
-loggerFactory.Dispose();
+    // Wait for proxy to fully stop (including system proxy deregistration)
+    // before starting the new instance
+    if (ConfigFileWatcher.ProxyStoppedCompletionSource is not null)
+    {
+#pragma warning disable VSTHRD003 // Intentionally waiting for external signal
+        await ConfigFileWatcher.ProxyStoppedCompletionSource.Task;
+#pragma warning restore VSTHRD003
+    }
+} while (ConfigFileWatcher.IsRestarting);
+
 Environment.Exit(exitCode);

@@ -287,4 +287,13 @@ public sealed class ApiCenterMinimalPermissionsPlugin(
 
         return (requestsByApiDefinition, unmatchedRequests);
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _apiCenterClient?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }

@@ -348,4 +348,13 @@ public sealed class LanguageModelRateLimitingPlugin(
     }
 
     private static string BuildThrottleKey(Request r) => r.RequestUri.Host;
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _loader?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }
