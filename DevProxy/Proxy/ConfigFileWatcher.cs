@@ -83,21 +83,41 @@ sealed class ConfigFileWatcher(
         }
         _lastReloadTime = now;
 
-        _logger.LogInformation("Configuration file changed. Restarting proxy...");
-        IsRestarting = true;
-        ProxyStoppedCompletionSource = new TaskCompletionSource();
-        _hostApplicationLifetime.StopApplication();
+        try
+        {
+            _logger.LogInformation("Configuration file changed. Restarting proxy...");
+            IsRestarting = true;
+            ProxyStoppedCompletionSource = new TaskCompletionSource();
+            _hostApplicationLifetime.StopApplication();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error while handling configuration file change. Restart has not been initiated.");
+            IsRestarting = false;
+            ProxyStoppedCompletionSource = null;
+        }
+    }
+
+    private void DisposeWatcher()
+    {
+        var watcher = _watcher;
+        if (watcher is null)
+        {
+            return;
+        }
+
+        _watcher = null;
+        watcher.Dispose();
     }
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
-        _watcher?.Dispose();
-        _watcher = null;
+        DisposeWatcher();
         return Task.CompletedTask;
     }
 
     public void Dispose()
     {
-        _watcher?.Dispose();
+        DisposeWatcher();
     }
 }

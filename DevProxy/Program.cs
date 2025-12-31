@@ -55,20 +55,44 @@ var options = new DevProxyConfigOptions();
 options.ParseOptions(args);
 
 int exitCode;
+bool shouldRestart;
 do
 {
-    // Reset the restart flag before each run
-    ConfigFileWatcher.Reset();
-    exitCode = await RunProxyAsync(args, options);
-
-    // Wait for proxy to fully stop (including system proxy deregistration)
-    // before starting the new instance
-    if (ConfigFileWatcher.ProxyStoppedCompletionSource is not null)
+    try
     {
+        // Reset the restart flag before each run
+        ConfigFileWatcher.Reset();
+        exitCode = await RunProxyAsync(args, options);
+
+        // Wait for proxy to fully stop (including system proxy deregistration)
+        // before starting the new instance
+        if (ConfigFileWatcher.ProxyStoppedCompletionSource is not null)
+        {
+            var proxyStoppedTask = ConfigFileWatcher.ProxyStoppedCompletionSource.Task;
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(30));
 #pragma warning disable VSTHRD003 // Intentionally waiting for external signal
-        await ConfigFileWatcher.ProxyStoppedCompletionSource.Task;
+            var completedTask = await Task.WhenAny(proxyStoppedTask, timeoutTask);
 #pragma warning restore VSTHRD003
+
+            // If the timeout elapses before the proxy signals it has stopped,
+            // continue to avoid hanging the restart loop indefinitely
+            if (completedTask == proxyStoppedTask)
+            {
+#pragma warning disable VSTHRD003 // Observe exceptions from completed task
+                await proxyStoppedTask;
+#pragma warning restore VSTHRD003
+            }
+        }
+
+        shouldRestart = ConfigFileWatcher.IsRestarting;
     }
-} while (ConfigFileWatcher.IsRestarting);
+    catch (Exception ex)
+    {
+        await Console.Error.WriteLineAsync("Unhandled exception during proxy run. Stopping restart loop.");
+        await Console.Error.WriteLineAsync(ex.ToString());
+        exitCode = 1;
+        shouldRestart = false;
+    }
+} while (shouldRestart);
 
 Environment.Exit(exitCode);

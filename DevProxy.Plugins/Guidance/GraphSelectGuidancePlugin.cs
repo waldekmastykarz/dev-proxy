@@ -17,7 +17,9 @@ public sealed class GraphSelectGuidancePlugin(
     ISet<UrlToWatch> urlsToWatch,
     MSGraphDb msGraphDb) : BasePlugin(logger, urlsToWatch)
 {
+#pragma warning disable CA2213 // MSGraphDb is DI-injected singleton, disposal is managed by the DI container
     private readonly MSGraphDb _msGraphDb = msGraphDb;
+#pragma warning restore CA2213
 
     public override string Name => nameof(GraphSelectGuidancePlugin);
 
