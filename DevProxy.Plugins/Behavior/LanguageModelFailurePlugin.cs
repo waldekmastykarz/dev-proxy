@@ -185,15 +185,18 @@ public sealed class LanguageModelFailurePlugin(
 
             var rawRequest = JsonSerializer.Deserialize<JsonElement>(content, ProxyUtils.JsonSerializerOptions);
 
-            // Check for Responses API request (has "input" with optional "instructions" or "previous_response_id")
+            // Check for Responses API request (has "input" with specific Responses API fields)
+            // Must check before embedding to distinguish them
             if (rawRequest.TryGetProperty("input", out var inputProp) &&
                 !rawRequest.TryGetProperty("voice", out _) &&
                 (rawRequest.TryGetProperty("instructions", out _) ||
                  rawRequest.TryGetProperty("previous_response_id", out _) ||
                  rawRequest.TryGetProperty("store", out _) ||
-                 inputProp.ValueKind == JsonValueKind.String ||
+                 // Or if input is an array with items that have "role" property (message items)
+                 // This distinguishes from embeddings which use arrays of strings
                  (inputProp.ValueKind == JsonValueKind.Array &&
                   inputProp.GetArrayLength() > 0 &&
+                  inputProp[0].ValueKind == JsonValueKind.Object &&
                   inputProp[0].TryGetProperty("role", out _))))
             {
                 Logger.LogDebug("Request is a Responses API request");
