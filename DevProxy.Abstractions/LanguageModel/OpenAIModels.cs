@@ -42,6 +42,26 @@ public class OpenAIRequest
 
             var rawRequest = JsonSerializer.Deserialize<JsonElement>(content, ProxyUtils.JsonSerializerOptions);
 
+            // Check for Responses API request (has "input" with optional "instructions" or "previous_response_id")
+            // Must check before embedding to distinguish them
+            if (rawRequest.TryGetProperty("input", out _) &&
+                !rawRequest.TryGetProperty("voice", out _) &&
+                (rawRequest.TryGetProperty("instructions", out _) ||
+                 rawRequest.TryGetProperty("previous_response_id", out _) ||
+                 rawRequest.TryGetProperty("store", out _) ||
+                 // Check if input is a string (Responses API supports string input directly)
+                 (rawRequest.TryGetProperty("input", out var inputProp) &&
+                  (inputProp.ValueKind == JsonValueKind.String ||
+                   // Or if input is an array with items that have "role" property (message items)
+                   (inputProp.ValueKind == JsonValueKind.Array &&
+                    inputProp.GetArrayLength() > 0 &&
+                    inputProp[0].TryGetProperty("role", out _))))))
+            {
+                logger.LogDebug("Request is a Responses API request");
+                request = JsonSerializer.Deserialize<OpenAIResponsesRequest>(content, ProxyUtils.JsonSerializerOptions);
+                return true;
+            }
+
             // Check for completion request (has "prompt", but not specific to image)
             if (rawRequest.TryGetProperty("prompt", out _) &&
                 !rawRequest.TryGetProperty("size", out _) &&
@@ -409,3 +429,241 @@ public class OpenAIImageData
     [JsonPropertyName("revised_prompt")]
     public string? RevisedPrompt { get; set; }
 }
+
+#region Responses API
+
+/// <summary>
+/// Request model for OpenAI Responses API (/v1/responses)
+/// </summary>
+public class OpenAIResponsesRequest : OpenAIRequest
+{
+    /// <summary>
+    /// Text, array of text, or array of input items (messages) to generate a response for.
+    /// </summary>
+    [JsonConverter(typeof(OpenAIResponsesInputJsonConverter))]
+    public object? Input { get; set; }
+
+    /// <summary>
+    /// System-level instructions for the model.
+    /// </summary>
+    public string? Instructions { get; set; }
+
+    /// <summary>
+    /// Whether to store the response for future reference.
+    /// </summary>
+    public bool? Store { get; set; }
+
+    /// <summary>
+    /// The ID of a previous response to continue the conversation.
+    /// </summary>
+    [JsonPropertyName("previous_response_id")]
+    public string? PreviousResponseId { get; set; }
+}
+
+/// <summary>
+/// Input item for Responses API (similar to chat messages but with different structure)
+/// </summary>
+public class OpenAIResponsesInputItem
+{
+    /// <summary>
+    /// The type of the item (e.g., "message", "function_call", "function_call_output")
+    /// </summary>
+    public string? Type { get; set; }
+
+    /// <summary>
+    /// The role of the message (user, assistant, system)
+    /// </summary>
+    public string? Role { get; set; }
+
+    /// <summary>
+    /// The content of the item
+    /// </summary>
+    [JsonConverter(typeof(OpenAIResponsesInputContentJsonConverter))]
+    public object? Content { get; set; }
+}
+
+/// <summary>
+/// Response model for OpenAI Responses API
+/// </summary>
+public class OpenAIResponsesResponse : OpenAIResponse
+{
+    /// <summary>
+    /// The timestamp when the response was created
+    /// </summary>
+    [JsonPropertyName("created_at")]
+    public long CreatedAt { get; set; }
+
+    /// <summary>
+    /// Array of output items from the model
+    /// </summary>
+    public IEnumerable<OpenAIResponsesOutputItem>? Output { get; set; }
+
+    /// <summary>
+    /// Helper property that returns the concatenated text from all message outputs
+    /// </summary>
+    [JsonPropertyName("output_text")]
+    public string? OutputText { get; set; }
+
+    /// <summary>
+    /// The status of the response
+    /// </summary>
+    public string? Status { get; set; }
+
+    public override string? Response => OutputText ?? GetOutputText();
+
+    private string? GetOutputText()
+    {
+        if (Output is null)
+        {
+            return null;
+        }
+
+        var textParts = Output
+            .Where(o => o.Type == "message" && o.Content is not null)
+            .SelectMany(o => o.Content!)
+            .Where(c => c.Type == "output_text" && !string.IsNullOrEmpty(c.Text))
+            .Select(c => c.Text);
+
+        return string.Join("", textParts);
+    }
+}
+
+/// <summary>
+/// Output item from Responses API
+/// </summary>
+public class OpenAIResponsesOutputItem
+{
+    /// <summary>
+    /// The unique identifier for this output item
+    /// </summary>
+    public string? Id { get; set; }
+
+    /// <summary>
+    /// The type of the output item (e.g., "message", "reasoning", "function_call")
+    /// </summary>
+    public string? Type { get; set; }
+
+    /// <summary>
+    /// The status of this output item
+    /// </summary>
+    public string? Status { get; set; }
+
+    /// <summary>
+    /// The role of the message (for message type items)
+    /// </summary>
+    public string? Role { get; set; }
+
+    /// <summary>
+    /// The content array for message type items
+    /// </summary>
+    public IEnumerable<OpenAIResponsesOutputContent>? Content { get; set; }
+}
+
+/// <summary>
+/// Content item within a Responses API output
+/// </summary>
+public class OpenAIResponsesOutputContent
+{
+    /// <summary>
+    /// The type of content (e.g., "output_text")
+    /// </summary>
+    public string? Type { get; set; }
+
+    /// <summary>
+    /// The text content
+    /// </summary>
+    public string? Text { get; set; }
+
+    /// <summary>
+    /// Annotations on the content
+    /// </summary>
+    public IEnumerable<object>? Annotations { get; set; }
+}
+
+/// <summary>
+/// JSON converter to handle the flexible "input" field in Responses API requests
+/// which can be a string, array of strings, or array of input items
+/// </summary>
+public class OpenAIResponsesInputJsonConverter : JsonConverter<object?>
+{
+    public override object? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        switch (reader.TokenType)
+        {
+            case JsonTokenType.String:
+                return reader.GetString();
+            case JsonTokenType.StartArray:
+                var items = new List<object>();
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                {
+                    if (reader.TokenType == JsonTokenType.String)
+                    {
+                        var str = reader.GetString();
+                        if (str is not null)
+                        {
+                            items.Add(str);
+                        }
+                    }
+                    else if (reader.TokenType == JsonTokenType.StartObject)
+                    {
+                        var item = JsonSerializer.Deserialize<OpenAIResponsesInputItem>(ref reader, options);
+                        if (item is not null)
+                        {
+                            items.Add(item);
+                        }
+                    }
+                }
+                return items;
+            case JsonTokenType.Null:
+                return null;
+            default:
+                throw new JsonException($"Unexpected token type: {reader.TokenType}");
+        }
+    }
+
+    public override void Write(Utf8JsonWriter writer, object? value, JsonSerializerOptions options)
+    {
+        JsonSerializer.Serialize(writer, value, options);
+    }
+}
+
+/// <summary>
+/// JSON converter to handle the flexible "content" field in Responses API input items
+/// which can be a string or array of content parts
+/// </summary>
+public class OpenAIResponsesInputContentJsonConverter : JsonConverter<object?>
+{
+    public override object? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        switch (reader.TokenType)
+        {
+            case JsonTokenType.String:
+                return reader.GetString();
+            case JsonTokenType.StartArray:
+                var items = new List<OpenAIContentPart>();
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                {
+                    if (reader.TokenType == JsonTokenType.StartObject)
+                    {
+                        var item = JsonSerializer.Deserialize<OpenAITextContentPart>(ref reader, options);
+                        if (item is not null)
+                        {
+                            items.Add(item);
+                        }
+                    }
+                }
+                return items;
+            case JsonTokenType.Null:
+                return null;
+            default:
+                throw new JsonException($"Unexpected token type: {reader.TokenType}");
+        }
+    }
+
+    public override void Write(Utf8JsonWriter writer, object? value, JsonSerializerOptions options)
+    {
+        JsonSerializer.Serialize(writer, value, options);
+    }
+}
+
+#endregion

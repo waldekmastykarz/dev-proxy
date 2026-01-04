@@ -286,6 +286,22 @@ public sealed class LanguageModelRateLimitingPlugin(
 
             var rawRequest = JsonSerializer.Deserialize<JsonElement>(content, ProxyUtils.JsonSerializerOptions);
 
+            // Check for Responses API request (has "input" with optional "instructions" or "previous_response_id")
+            if (rawRequest.TryGetProperty("input", out var inputProp) &&
+                !rawRequest.TryGetProperty("voice", out _) &&
+                (rawRequest.TryGetProperty("instructions", out _) ||
+                 rawRequest.TryGetProperty("previous_response_id", out _) ||
+                 rawRequest.TryGetProperty("store", out _) ||
+                 inputProp.ValueKind == JsonValueKind.String ||
+                 (inputProp.ValueKind == JsonValueKind.Array &&
+                  inputProp.GetArrayLength() > 0 &&
+                  inputProp[0].TryGetProperty("role", out _))))
+            {
+                Logger.LogDebug("Request is a Responses API request");
+                request = JsonSerializer.Deserialize<OpenAIResponsesRequest>(content, ProxyUtils.JsonSerializerOptions);
+                return true;
+            }
+
             if (rawRequest.TryGetProperty("prompt", out _))
             {
                 Logger.LogDebug("Request is a completion request");

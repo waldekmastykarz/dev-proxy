@@ -116,6 +116,50 @@ public sealed class LanguageModelFailurePlugin(
             Logger.LogRequest($"Simulating fault {faultName}", MessageType.Chaos, new(e.Session));
             e.Session.SetRequestBodyString(JsonSerializer.Serialize(newRequest, ProxyUtils.JsonSerializerOptions));
         }
+        else if (openAiRequest is OpenAIResponsesRequest responsesRequest)
+        {
+            // For Responses API, add the fault prompt as a new user message in the input
+            var inputItems = new List<object>();
+
+            // Preserve existing input items
+            if (responsesRequest.Input is string inputString)
+            {
+                inputItems.Add(new OpenAIResponsesInputItem
+                {
+                    Type = "message",
+                    Role = "user",
+                    Content = inputString
+                });
+            }
+            else if (responsesRequest.Input is IEnumerable<object> existingItems)
+            {
+                inputItems.AddRange(existingItems);
+            }
+
+            // Add fault prompt as a new user message
+            inputItems.Add(new OpenAIResponsesInputItem
+            {
+                Type = "message",
+                Role = "user",
+                Content = faultPrompt
+            });
+
+            var newRequest = new OpenAIResponsesRequest
+            {
+                Model = responsesRequest.Model,
+                Stream = responsesRequest.Stream,
+                Temperature = responsesRequest.Temperature,
+                TopP = responsesRequest.TopP,
+                Input = inputItems,
+                Instructions = responsesRequest.Instructions,
+                Store = responsesRequest.Store,
+                PreviousResponseId = responsesRequest.PreviousResponseId
+            };
+
+            Logger.LogDebug("Added fault prompt to Responses API input: {Prompt}", faultPrompt);
+            Logger.LogRequest($"Simulating fault {faultName}", MessageType.Chaos, new(e.Session));
+            e.Session.SetRequestBodyString(JsonSerializer.Serialize(newRequest, ProxyUtils.JsonSerializerOptions));
+        }
         else
         {
             Logger.LogDebug("Unknown OpenAI request type. Passing request as-is.");
@@ -140,6 +184,22 @@ public sealed class LanguageModelFailurePlugin(
             Logger.LogDebug("Checking if the request is an OpenAI request...");
 
             var rawRequest = JsonSerializer.Deserialize<JsonElement>(content, ProxyUtils.JsonSerializerOptions);
+
+            // Check for Responses API request (has "input" with optional "instructions" or "previous_response_id")
+            if (rawRequest.TryGetProperty("input", out var inputProp) &&
+                !rawRequest.TryGetProperty("voice", out _) &&
+                (rawRequest.TryGetProperty("instructions", out _) ||
+                 rawRequest.TryGetProperty("previous_response_id", out _) ||
+                 rawRequest.TryGetProperty("store", out _) ||
+                 inputProp.ValueKind == JsonValueKind.String ||
+                 (inputProp.ValueKind == JsonValueKind.Array &&
+                  inputProp.GetArrayLength() > 0 &&
+                  inputProp[0].TryGetProperty("role", out _))))
+            {
+                Logger.LogDebug("Request is a Responses API request");
+                request = JsonSerializer.Deserialize<OpenAIResponsesRequest>(content, ProxyUtils.JsonSerializerOptions);
+                return true;
+            }
 
             if (rawRequest.TryGetProperty("prompt", out _))
             {

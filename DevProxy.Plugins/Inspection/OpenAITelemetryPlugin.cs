@@ -368,6 +368,9 @@ public sealed class OpenAITelemetryPlugin(
                 case OpenAIFineTuneRequest:
                     AddFineTuneResponseTags(activity, openAiRequest, responseBody);
                     break;
+                case OpenAIResponsesRequest:
+                    AddResponsesResponseTags(activity, openAiRequest, responseBody);
+                    break;
                 default:
                     throw new InvalidOperationException($"Unsupported OpenAI request type: {openAiRequest.GetType().Name}");
             }
@@ -561,6 +564,9 @@ public sealed class OpenAITelemetryPlugin(
                 break;
             case OpenAIFineTuneRequest fineTuneRequest:
                 AddFineTuneRequestTags(activity, fineTuneRequest);
+                break;
+            case OpenAIResponsesRequest responsesRequest:
+                AddResponsesRequestTags(activity, responsesRequest);
                 break;
             default:
                 throw new InvalidOperationException($"Unsupported OpenAI request type: {openAiRequest.GetType().Name}");
@@ -772,6 +778,105 @@ public sealed class OpenAITelemetryPlugin(
         }
 
         Logger.LogTrace("AddFineTuneRequestTags() finished");
+    }
+
+    private void AddResponsesRequestTags(Activity activity, OpenAIResponsesRequest responsesRequest)
+    {
+        Logger.LogTrace("AddResponsesRequestTags() called");
+
+        // OpenLIT - Responses API is similar to chat but uses the new API
+        _ = activity.SetTag(SemanticConvention.GEN_AI_OPERATION, SemanticConvention.GEN_AI_OPERATION_TYPE_CHAT)
+        // OpenTelemetry
+            .SetTag(SemanticConvention.GEN_AI_OPERATION_NAME, "responses");
+
+        if (Configuration.IncludePrompt)
+        {
+            string? promptText = null;
+
+            if (responsesRequest.Input is string inputString)
+            {
+                promptText = inputString;
+            }
+            else if (responsesRequest.Input is IEnumerable<object> inputItems)
+            {
+                var formattedMessages = new List<string>();
+                foreach (var item in inputItems)
+                {
+                    if (item is OpenAIResponsesInputItem inputItem)
+                    {
+                        var role = inputItem.Role ?? "user";
+                        var content = inputItem.Content?.ToString() ?? "";
+                        formattedMessages.Add($"{role}: {content}");
+                    }
+                    else if (item is string str)
+                    {
+                        formattedMessages.Add($"user: {str}");
+                    }
+                }
+                promptText = string.Join("\n", formattedMessages);
+            }
+
+            if (!string.IsNullOrEmpty(promptText))
+            {
+                _ = activity.SetTag(SemanticConvention.GEN_AI_CONTENT_PROMPT, promptText);
+            }
+        }
+
+        if (!string.IsNullOrEmpty(responsesRequest.Instructions))
+        {
+            _ = activity.SetTag("ai.request.instructions", responsesRequest.Instructions);
+        }
+
+        if (responsesRequest.Store.HasValue)
+        {
+            _ = activity.SetTag("ai.request.store", responsesRequest.Store.Value);
+        }
+
+        if (!string.IsNullOrEmpty(responsesRequest.PreviousResponseId))
+        {
+            _ = activity.SetTag("ai.request.previous_response_id", responsesRequest.PreviousResponseId);
+        }
+
+        Logger.LogTrace("AddResponsesRequestTags() finished");
+    }
+
+    private void AddResponsesResponseTags(Activity activity, OpenAIRequest openAIRequest, string responseBody)
+    {
+        Logger.LogTrace("AddResponsesResponseTags() called");
+
+        var responsesResponse = JsonSerializer.Deserialize<OpenAIResponsesResponse>(responseBody, ProxyUtils.JsonSerializerOptions);
+        if (responsesResponse is null)
+        {
+            return;
+        }
+
+        RecordUsageMetrics(activity, openAIRequest, responsesResponse);
+
+        _ = activity.SetTag(SemanticConvention.GEN_AI_RESPONSE_ID, responsesResponse.Id);
+
+        if (!string.IsNullOrEmpty(responsesResponse.Status))
+        {
+            _ = activity.SetTag("ai.response.status", responsesResponse.Status);
+        }
+
+        if (Configuration.IncludeCompletion)
+        {
+            var outputText = responsesResponse.Response;
+            if (!string.IsNullOrEmpty(outputText))
+            {
+                _ = activity.SetTag(SemanticConvention.GEN_AI_CONTENT_COMPLETION, outputText);
+            }
+        }
+
+        // Set finish reason from the last message output item
+        var lastMessageItem = responsesResponse.Output?
+            .LastOrDefault(o => o.Type == "message");
+        if (lastMessageItem?.Status is not null)
+        {
+            _ = activity.SetTag(SemanticConvention.GEN_AI_RESPONSE_FINISH_REASON, lastMessageItem.Status);
+        }
+
+        Logger.LogTrace("AddResponsesResponseTags() finished");
     }
 
     private void AddCommonRequestTags(Activity activity, OpenAIRequest openAiRequest)
@@ -1004,6 +1109,7 @@ public sealed class OpenAITelemetryPlugin(
             OpenAIAudioRequest => "audio.transcriptions",
             OpenAIAudioSpeechRequest => "audio.speech",
             OpenAIFineTuneRequest => "fine_tuning.jobs",
+            OpenAIResponsesRequest => "responses",
             _ => "unknown"
         };
     }
