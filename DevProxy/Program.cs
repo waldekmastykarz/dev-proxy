@@ -41,7 +41,7 @@ static WebApplication BuildApplication(DevProxyConfigOptions options)
 
 static async Task<int> RunProxyAsync(string[] args, DevProxyConfigOptions options)
 {
-    var app = BuildApplication(args, options);
+    var app = BuildApplication(options);
     try
     {
         var devProxyCommand = app.Services.GetRequiredService<DevProxyCommand>();

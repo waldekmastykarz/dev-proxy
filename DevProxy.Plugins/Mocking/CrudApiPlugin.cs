@@ -606,7 +606,8 @@ public sealed class CrudApiPlugin(
     {
         if (disposing)
         {
-            _loader?.Dispose();
+            _dataLoader?.Dispose();
+            _definitionLoader?.Dispose();
         }
         base.Dispose(disposing);
     }
