@@ -22,7 +22,7 @@ if [[ ! -f "$WORKSPACE_ROOT/DevProxy.sln" ]]; then
 fi
 
 # Extract current version from DevProxy.csproj
-CURRENT_VERSION=$(grep -oP '(?<=<Version>)[^<]+' "$WORKSPACE_ROOT/DevProxy/DevProxy.csproj" | head -1)
+CURRENT_VERSION=$(sed -n 's/.*<Version>\([^<][^<]*\)<\/Version>.*/\1/p' "$WORKSPACE_ROOT/DevProxy/DevProxy.csproj" | head -1)
 
 if [[ -z "$CURRENT_VERSION" ]]; then
     echo "Error: Could not determine current version"
