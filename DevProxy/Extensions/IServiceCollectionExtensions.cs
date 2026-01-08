@@ -41,6 +41,7 @@ static class IServiceCollectionExtensions
             .AddSingleton<IProxyConfiguration, ProxyConfiguration>()
             .AddSingleton<IProxyStateController, ProxyStateController>()
             .AddSingleton<IProxyState, ProxyState>()
+            .AddHostedService<ConfigFileWatcher>()
             .AddSingleton(sp => ProxyEngine.Certificate!)
             .AddSingleton(sp => LanguageModelClientFactory.Create(sp, configuration))
             .AddSingleton<UpdateNotification>()

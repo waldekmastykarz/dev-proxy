@@ -242,4 +242,13 @@ public sealed class ApiCenterProductionVersionPlugin(
 
         Logger.LogTrace("Left {Name}", nameof(AfterRecordingStopAsync));
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _apiCenterClient?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }

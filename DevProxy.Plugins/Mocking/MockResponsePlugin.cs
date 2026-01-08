@@ -730,4 +730,13 @@ public class MockResponsePlugin(
         // Fallback: return as string to avoid exceptions
         return element.GetRawText();
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _loader?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }

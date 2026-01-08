@@ -50,7 +50,7 @@ public sealed class DevToolsPlugin(
         logger,
         urlsToWatch,
         proxyConfiguration,
-        pluginConfigurationSection), IDisposable
+        pluginConfigurationSection)
 {
     private readonly Dictionary<string, GetResponseBodyResultParams> _responseBody = [];
 
@@ -471,8 +471,12 @@ public sealed class DevToolsPlugin(
         return isTextResponse;
     }
 
-    public void Dispose()
+    protected override void Dispose(bool disposing)
     {
-        _webSocket?.Dispose();
+        if (disposing)
+        {
+            _webSocket?.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }

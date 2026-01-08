@@ -21,7 +21,7 @@ public abstract class BaseLoader(HttpClient httpClient, ILogger logger, IProxyCo
 
     private FileSystemWatcher? _watcher;
     private Timer? _debounceTimer;
-    private bool _isDisposed;
+    private volatile bool _isDisposed;
 
     protected abstract string FilePath { get; }
     protected ILogger Logger { get; } = logger;
@@ -65,13 +65,14 @@ public abstract class BaseLoader(HttpClient httpClient, ILogger logger, IProxyCo
             return;
         }
 
+        // Set flag first to prevent in-flight timer callbacks from proceeding
+        _isDisposed = true;
+
         if (disposing)
         {
             _watcher?.Dispose();
             _debounceTimer?.Dispose();
         }
-
-        _isDisposed = true;
     }
 
     private async Task<bool> ValidateFileContentsAsync(string fileContents, CancellationToken cancellationToken)
@@ -104,6 +105,11 @@ public abstract class BaseLoader(HttpClient httpClient, ILogger logger, IProxyCo
 
     private async Task LoadFileContentsAsync(CancellationToken cancellationToken)
     {
+        if (_isDisposed)
+        {
+            return;
+        }
+
         if (!File.Exists(FilePath))
         {
             Logger.LogWarning("File {File} not found. No data will be loaded", FilePath);
@@ -129,6 +135,12 @@ public abstract class BaseLoader(HttpClient httpClient, ILogger logger, IProxyCo
 
     private void File_Changed(object sender, FileSystemEventArgs e)
     {
+        // Don't process file changes if this loader has been disposed
+        if (_isDisposed)
+        {
+            return;
+        }
+
         lock (_debounceLock)
         {
             _debounceTimer?.Dispose();
