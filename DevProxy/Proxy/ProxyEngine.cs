@@ -294,10 +294,7 @@ sealed class ProxyEngine(
         // Unsubscribe & Quit
         try
         {
-            if (_explicitEndPoint != null)
-            {
-                _explicitEndPoint.BeforeTunnelConnectRequest -= OnBeforeTunnelConnectRequestAsync;
-            }
+            _explicitEndPoint?.BeforeTunnelConnectRequest -= OnBeforeTunnelConnectRequestAsync;
 
             if (ProxyServer is not null)
             {
@@ -311,6 +308,11 @@ sealed class ProxyEngine(
                 {
                     ProxyServer.Stop();
                 }
+
+                if (_explicitEndPoint != null && ProxyServer.ProxyEndPoints.Contains(_explicitEndPoint))
+                {
+                    ProxyServer.RemoveEndPoint(_explicitEndPoint);
+                }
             }
 
             _inactivityTimer?.Stop();
@@ -319,6 +321,9 @@ sealed class ProxyEngine(
             {
                 ToggleSystemProxy(ToggleSystemProxyAction.Off);
             }
+
+            // Signal that proxy has fully stopped (including system proxy deregistration)
+            ConfigFileWatcher.SignalProxyStopped();
         }
         catch (Exception ex)
         {

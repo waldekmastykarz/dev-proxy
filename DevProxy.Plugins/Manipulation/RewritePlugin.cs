@@ -104,4 +104,13 @@ public sealed class RewritePlugin(
         Logger.LogTrace("Left {Name}", nameof(BeforeRequestAsync));
         return Task.CompletedTask;
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _loader?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }

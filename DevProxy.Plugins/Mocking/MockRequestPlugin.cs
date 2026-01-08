@@ -34,7 +34,7 @@ public class MockRequestPlugin(
         logger,
         urlsToWatch,
         proxyConfiguration,
-        pluginConfigurationSection), IDisposable
+        pluginConfigurationSection)
 {
     private bool _isDisposed;
 #pragma warning disable CA2213 // False positive: HttpClient is injected from DI
@@ -118,7 +118,7 @@ public class MockRequestPlugin(
         return requestMessage;
     }
 
-    protected virtual void Dispose(bool disposing)
+    protected override void Dispose(bool disposing)
     {
         if (_isDisposed)
         {
@@ -131,11 +131,6 @@ public class MockRequestPlugin(
         }
 
         _isDisposed = true;
-    }
-
-    public void Dispose()
-    {
-        Dispose(true);
-        GC.SuppressFinalize(this);
+        base.Dispose(disposing);
     }
 }

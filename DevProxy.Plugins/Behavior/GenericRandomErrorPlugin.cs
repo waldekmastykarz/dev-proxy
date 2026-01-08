@@ -345,4 +345,13 @@ public sealed class GenericRandomErrorPlugin(
 
     // throttle requests per host
     private static string BuildThrottleKey(Request r) => r.RequestUri.Host;
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _loader?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }

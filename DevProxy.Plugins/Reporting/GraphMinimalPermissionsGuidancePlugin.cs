@@ -49,7 +49,9 @@ public sealed class GraphMinimalPermissionsGuidancePlugin(
         pluginConfigurationSection)
 {
     private GraphUtils? _graphUtils;
+#pragma warning disable CA2213 // Disposable fields should be disposed - HttpClient is injected via DI
     private readonly HttpClient _httpClient = httpClient;
+#pragma warning restore CA2213
 
     public override string Name => nameof(GraphMinimalPermissionsGuidancePlugin);
 

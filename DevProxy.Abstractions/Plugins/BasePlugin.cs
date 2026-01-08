@@ -3,6 +3,7 @@
 // See the LICENSE file in the project root for more information.
 
 using System.CommandLine;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text.Json;
 using DevProxy.Abstractions.Proxy;
@@ -15,7 +16,7 @@ namespace DevProxy.Abstractions.Plugins;
 
 public abstract class BasePlugin(
     ILogger logger,
-    ISet<UrlToWatch> urlsToWatch) : IPlugin
+    ISet<UrlToWatch> urlsToWatch) : IPlugin, IDisposable
 {
     public bool Enabled { get; protected set; } = true;
     protected ILogger Logger { get; } = logger;
@@ -64,6 +65,17 @@ public abstract class BasePlugin(
     {
         return Task.CompletedTask;
     }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        // Override in derived classes to dispose managed resources
+    }
+
+    public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
 }
 
 public abstract class BasePlugin<TConfiguration>(
@@ -74,27 +86,30 @@ public abstract class BasePlugin<TConfiguration>(
     IConfigurationSection pluginConfigurationSection) :
     BasePlugin(logger, urlsToWatch), IPlugin<TConfiguration> where TConfiguration : new()
 {
-    private TConfiguration? _configuration;
+#pragma warning disable CA2213 // HttpClient is injected from DI and should not be disposed by this class
     private readonly HttpClient _httpClient = httpClient;
+#pragma warning restore CA2213
 
     protected IProxyConfiguration ProxyConfiguration { get; } = proxyConfiguration;
+
+    [AllowNull]
     public TConfiguration Configuration
     {
         get
         {
-            if (_configuration is null)
+            if (field is null)
             {
                 if (!ConfigurationSection.Exists())
                 {
-                    _configuration = new();
+                    field = new();
                 }
                 else
                 {
-                    _configuration = ConfigurationSection.Get<TConfiguration>();
+                    field = ConfigurationSection.Get<TConfiguration>();
                 }
             }
 
-            return _configuration!;
+            return field!;
         }
     }
     public IConfigurationSection ConfigurationSection { get; } = pluginConfigurationSection;
