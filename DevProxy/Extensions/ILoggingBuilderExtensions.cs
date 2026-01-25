@@ -39,6 +39,19 @@ static class ILoggingBuilderExtensions
             return builder;
         }
 
+        // For detached/daemon mode, log to file
+        if (DevProxyCommand.IsInternalDaemon)
+        {
+            _ = builder
+                .ClearProviders()
+                .SetMinimumLevel(configuredLogLevel);
+#pragma warning disable CA2000 // Dispose objects before losing scope - DI container manages lifetime
+            _ = builder.Services.AddSingleton<ILoggerProvider>(
+                new DetachedFileLoggerProvider(DevProxyCommand.DetachedLogFilePath));
+#pragma warning restore CA2000
+            return builder;
+        }
+
         _ = builder
             .AddFilter("Microsoft.Hosting.*", LogLevel.Error)
             .AddFilter("Microsoft.AspNetCore.*", LogLevel.Error)

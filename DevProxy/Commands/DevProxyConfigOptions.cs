@@ -18,6 +18,7 @@ sealed class DevProxyConfigOptions : RootCommand
     }
 
     public int? ApiPort => _parseResult?.GetValueOrDefault<int?>(DevProxyCommand.ApiPortOptionName);
+    public int? Port => _parseResult?.GetValueOrDefault<int?>(DevProxyCommand.PortOptionName);
     public bool Discover => _parseResult?.GetValueOrDefault<bool?>(DevProxyCommand.DiscoverOptionName) ?? false;
     public string? IPAddress => _parseResult?.GetValueOrDefault<string?>(DevProxyCommand.IpAddressOptionName);
     public LogLevel? LogLevel => _parseResult?.GetValueOrDefault<LogLevel?>(DevProxyCommand.LogLevelOptionName);
@@ -115,6 +116,7 @@ sealed class DevProxyConfigOptions : RootCommand
             }
         };
         var apiPortOption = new Option<int?>(DevProxyCommand.ApiPortOptionName);
+        var portOption = new Option<int?>(DevProxyCommand.PortOptionName, "-p");
 
         var discoverOption = new Option<bool>(DevProxyCommand.DiscoverOptionName, "--discover")
         {
@@ -126,6 +128,7 @@ sealed class DevProxyConfigOptions : RootCommand
             apiPortOption,
             ipAddressOption,
             configFileOption,
+            portOption,
             urlsToWatchOption,
             logLevelOption,
             discoverOption
