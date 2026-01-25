@@ -5,6 +5,7 @@
 using DevProxy.Abstractions.Plugins;
 using DevProxy.Abstractions.Proxy;
 using DevProxy.Abstractions.Utils;
+using DevProxy.Commands;
 using Microsoft.VisualStudio.Threading;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -170,6 +171,7 @@ sealed class ProxyEngine(
         }
 
         var isInteractive = !Console.IsInputRedirected &&
+            !DevProxyCommand.IsInternalDaemon &&
             Environment.GetEnvironmentVariable("CI") is null;
 
         if (_config.LogFor == LogFor.Machine)
