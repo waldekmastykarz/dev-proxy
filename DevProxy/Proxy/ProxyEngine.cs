@@ -30,13 +30,16 @@ sealed class ProxyEngine(
     IProxyConfiguration proxyConfiguration,
     ISet<UrlToWatch> urlsToWatch,
     IProxyStateController proxyController,
-    ILogger<ProxyEngine> logger) : BackgroundService, IDisposable
+    ILogger<ProxyEngine> logger,
+    ILoggerFactory loggerFactory) : BackgroundService, IDisposable
 {
     private readonly IEnumerable<IPlugin> _plugins = plugins;
     private readonly ILogger _logger = logger;
     private readonly IProxyConfiguration _config = proxyConfiguration;
 
-    internal static ProxyServer ProxyServer { get; private set; }
+    internal static ProxyServer ProxyServer { get; private set; } = null!;
+    private static bool _isProxyServerInitialized;
+    private static readonly object _initLock = new();
     private ExplicitProxyEndPoint? _explicitEndPoint;
     // lists of URLs to watch, used for intercepting requests
     private readonly ISet<UrlToWatch> _urlsToWatch = urlsToWatch;
@@ -56,22 +59,52 @@ sealed class ProxyEngine(
 
     static ProxyEngine()
     {
-        ProxyServer = new();
-        ProxyServer.CertificateManager.PfxFilePath = Environment.GetEnvironmentVariable("DEV_PROXY_CERT_PATH") ?? string.Empty;
-        ProxyServer.CertificateManager.RootCertificateName = "Dev Proxy CA";
-        ProxyServer.CertificateManager.CertificateStorage = new CertificateDiskCache();
-        // we need to change this to a value lower than 397
-        // to avoid the ERR_CERT_VALIDITY_TOO_LONG error in Edge
-        ProxyServer.CertificateManager.CertificateValidDays = 365;
+        // ProxyServer initialization moved to EnsureProxyServerInitialized
+        // to enable passing ILoggerFactory for Unobtanium logging
+    }
 
-        using var joinableTaskContext = new JoinableTaskContext();
-        var joinableTaskFactory = new JoinableTaskFactory(joinableTaskContext);
-        _ = joinableTaskFactory.Run(async () => await ProxyServer.CertificateManager.LoadOrCreateRootCertificateAsync());
+    // Ensure ProxyServer is initialized with the given ILoggerFactory
+    // This method can be called from multiple places (ProxyEngine, CertCommand, etc.)
+    internal static void EnsureProxyServerInitialized(ILoggerFactory? loggerFactory = null)
+    {
+        if (_isProxyServerInitialized)
+        {
+            return;
+        }
+
+        lock (_initLock)
+        {
+            if (_isProxyServerInitialized)
+            {
+                return;
+            }
+
+            // On macOS/Linux, don't let Unobtanium try to install the cert
+            // in the Root store via .NET's X509Store API — it requires admin
+            // privileges and fails with "Access is denied".
+            // On macOS, Dev Proxy handles trust via MacCertificateHelper instead.
+            ProxyServer = new(userTrustRootCertificate: RunTime.IsWindows, loggerFactory: loggerFactory);
+            ProxyServer.CertificateManager.PfxFilePath = Environment.GetEnvironmentVariable("DEV_PROXY_CERT_PATH") ?? string.Empty;
+            ProxyServer.CertificateManager.RootCertificateName = "Dev Proxy CA";
+            ProxyServer.CertificateManager.CertificateStorage = new CertificateDiskCache();
+            // we need to change this to a value lower than 397
+            // to avoid the ERR_CERT_VALIDITY_TOO_LONG error in Edge
+            ProxyServer.CertificateManager.CertificateValidDays = 365;
+
+            using var joinableTaskContext = new JoinableTaskContext();
+            var joinableTaskFactory = new JoinableTaskFactory(joinableTaskContext);
+            _ = joinableTaskFactory.Run(async () => await ProxyServer.CertificateManager.LoadOrCreateRootCertificateAsync());
+
+            _isProxyServerInitialized = true;
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _cancellationToken = stoppingToken;
+
+        // Initialize ProxyServer with LoggerFactory for Unobtanium logging
+        EnsureProxyServerInitialized(loggerFactory);
 
         Debug.Assert(ProxyServer is not null, "Proxy server is not initialized");
 
@@ -139,9 +172,15 @@ sealed class ProxyEngine(
         var isInteractive = !Console.IsInputRedirected &&
             Environment.GetEnvironmentVariable("CI") is null;
 
-        if (isInteractive)
+        if (_config.LogFor == LogFor.Machine)
         {
-            // only print hotkeys when they can be used
+            // Always print API instructions in machine mode
+            // since LLMs/agents can use the API even in non-interactive mode
+            PrintApiInstructions(_config);
+        }
+        else if (isInteractive)
+        {
+            // Print hotkeys only when they can be used (interactive terminal, human mode)
             PrintHotkeys();
         }
 
@@ -188,18 +227,26 @@ sealed class ProxyEngine(
             return;
         }
 
-        var bashScriptPath = Path.Join(ProxyUtils.AppFolder, "trust-cert.sh");
-        ProcessStartInfo startInfo = new()
-        {
-            FileName = "/bin/bash",
-            Arguments = bashScriptPath,
-            UseShellExecute = true,
-            CreateNoWindow = false
-        };
+        Console.WriteLine();
+        Console.WriteLine("Dev Proxy uses a self-signed certificate to intercept and inspect HTTPS traffic.");
+        Console.Write("Update the certificate in your Keychain so that it's trusted by your browser? (Y/n): ");
+        var answer = Console.ReadLine()?.Trim();
 
-        using var process = new Process() { StartInfo = startInfo };
-        _ = process.Start();
-        process.WaitForExit();
+        if (string.Equals(answer, "n", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("Trust the certificate in your Keychain manually to avoid errors.");
+            return;
+        }
+
+        var certificate = ProxyServer.CertificateManager.RootCertificate;
+        if (certificate is null)
+        {
+            _logger.LogError("Root certificate not found. Cannot trust certificate.");
+            return;
+        }
+
+        MacCertificateHelper.TrustCertificate(certificate, _logger);
+        _logger.LogInformation("Certificate trusted successfully.");
     }
 
     private async Task ReadKeysAsync(CancellationToken cancellationToken)
@@ -217,7 +264,14 @@ sealed class ProxyEngine(
                 break;
             case ConsoleKey.C:
                 Console.Clear();
-                PrintHotkeys();
+                if (_config.LogFor == LogFor.Machine)
+                {
+                    PrintApiInstructions(_config);
+                }
+                else
+                {
+                    PrintHotkeys();
+                }
                 break;
             case ConsoleKey.W:
                 await _proxyController.MockRequestAsync(cancellationToken);
@@ -605,6 +659,18 @@ sealed class ProxyEngine(
         Console.WriteLine("");
         Console.WriteLine("Hotkeys: issue (w)eb request, (r)ecord, (s)top recording, (c)lear screen");
         Console.WriteLine("Press CTRL+C to stop Dev Proxy");
+        Console.WriteLine("");
+    }
+
+    private static void PrintApiInstructions(IProxyConfiguration config)
+    {
+        var baseUrl = $"http://{config.IPAddress}:{config.ApiPort}/proxy";
+        var timestamp = DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        Console.WriteLine("");
+        Console.WriteLine($"{{\"type\":\"log\",\"level\":\"info\",\"message\":\"Issue web request: curl -X POST {baseUrl}/mockRequest\",\"category\":\"ProxyEngine\",\"timestamp\":\"{timestamp}\"}}");
+        Console.WriteLine($"{{\"type\":\"log\",\"level\":\"info\",\"message\":\"Start recording: curl -X POST {baseUrl} -H \\\"Content-Type: application/json\\\" -d '{{\\\"recording\\\": true}}'\",\"category\":\"ProxyEngine\",\"timestamp\":\"{timestamp}\"}}");
+        Console.WriteLine($"{{\"type\":\"log\",\"level\":\"info\",\"message\":\"Stop recording: curl -X POST {baseUrl} -H \\\"Content-Type: application/json\\\" -d '{{\\\"recording\\\": false}}'\",\"category\":\"ProxyEngine\",\"timestamp\":\"{timestamp}\"}}");
+        Console.WriteLine($"{{\"type\":\"log\",\"level\":\"info\",\"message\":\"Stop Dev Proxy: curl -X POST {baseUrl}/stopProxy\",\"category\":\"ProxyEngine\",\"timestamp\":\"{timestamp}\"}}");
         Console.WriteLine("");
     }
 
