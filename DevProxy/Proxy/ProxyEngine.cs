@@ -697,7 +697,10 @@ sealed class ProxyEngine(
 
         using var process = new Process() { StartInfo = startInfo };
         _ = process.Start();
-        process.WaitForExit();
+        if (!process.WaitForExit(TimeSpan.FromSeconds(10)))
+        {
+            process.Kill();
+        }
     }
 
     private static int GetProcessId(TunnelConnectSessionEventArgs e)

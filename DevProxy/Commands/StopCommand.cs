@@ -112,6 +112,8 @@ internal sealed class StopCommand : Command
 
     private static async Task<int> ForceStopAsync(ProxyInstanceState state, CancellationToken cancellationToken)
     {
+        DisableSystemProxy();
+
         try
         {
             var process = Process.GetProcessById(state.Pid);
@@ -135,5 +137,47 @@ internal sealed class StopCommand : Command
 
         await StateManager.DeleteStateAsync(cancellationToken);
         return 0;
+    }
+
+    /// <summary>
+    /// Disables the system proxy on macOS by calling toggle-proxy.sh off.
+    /// This ensures the system proxy settings are cleaned up even when the
+    /// daemon process is killed forcefully (SIGKILL cannot be caught).
+    /// </summary>
+    private static void DisableSystemProxy()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        var bashScriptPath = Path.Join(AppContext.BaseDirectory, "toggle-proxy.sh");
+        if (!File.Exists(bashScriptPath))
+        {
+            return;
+        }
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "/bin/bash",
+            Arguments = $"{bashScriptPath} off",
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        try
+        {
+            using var process = new Process { StartInfo = startInfo };
+            process.Start();
+            if (!process.WaitForExit(TimeSpan.FromSeconds(10)))
+            {
+                process.Kill();
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup — don't block the stop flow
+        }
     }
 }
