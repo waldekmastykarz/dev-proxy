@@ -78,12 +78,11 @@ sealed class GraphUtils(
                 _logger.LogWarning(ex, "Failed to get permissions for {Url}", u);
                 return null;
             }
-        });
-        _ = await Task.WhenAll(tasks);
+        }).ToArray();
+        var results = await Task.WhenAll(tasks);
 
-        foreach (var task in tasks)
+        foreach (var response in results)
         {
-            var response = await task;
             if (response is null)
             {
                 continue;
