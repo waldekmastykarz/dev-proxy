@@ -1069,15 +1069,21 @@ public sealed class DevToolsPlugin(
     // (RFC 7231, RFC 8259) treat UTF-8 as the default for JSON and most web content.
     private static string GetBodyString(string? contentType, byte[] body)
     {
-        if (contentType is not null &&
-            contentType.IndexOf("charset=", StringComparison.OrdinalIgnoreCase) > -1)
+        if (contentType is not null)
         {
-            // Charset is explicitly specified; decode the body using that charset
-            return Encoding.GetEncoding(
-                contentType[(contentType.IndexOf("charset=", StringComparison.OrdinalIgnoreCase) + 8)..]
-                    .Split(';', ' ')[0]
-                    .Trim()
-            ).GetString(body);
+            try
+            {
+                var ct = new System.Net.Mime.ContentType(contentType);
+                if (!string.IsNullOrEmpty(ct.CharSet))
+                {
+                    return Encoding.GetEncoding(ct.CharSet).GetString(body);
+                }
+            }
+            catch
+            {
+                // Malformed Content-Type or unsupported charset; fall through
+                // to UTF-8 default
+            }
         }
 
         return Encoding.UTF8.GetString(body);
