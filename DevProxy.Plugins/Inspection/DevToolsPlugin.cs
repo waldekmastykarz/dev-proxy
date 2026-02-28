@@ -119,7 +119,7 @@ public sealed class DevToolsPlugin(
                     Url = e.Session.HttpClient.Request.Url,
                     Method = e.Session.HttpClient.Request.Method,
                     Headers = headers,
-                    PostData = e.Session.HttpClient.Request.HasBody ? e.Session.HttpClient.Request.BodyString : null
+                    PostData = e.Session.HttpClient.Request.HasBody ? GetBodyString(e.Session.HttpClient.Request.ContentType, e.Session.HttpClient.Request.Body) : null
                 },
                 Timestamp = (double)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000,
                 WallTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
@@ -173,7 +173,7 @@ public sealed class DevToolsPlugin(
         {
             if (IsTextResponse(e.Session.HttpClient.Response.ContentType))
             {
-                body.Body = e.Session.HttpClient.Response.BodyString;
+                body.Body = GetBodyString(e.Session.HttpClient.Response.ContentType, e.Session.HttpClient.Response.Body);
                 body.Base64Encoded = false;
             }
             else
@@ -1060,6 +1060,27 @@ public sealed class DevToolsPlugin(
         }
 
         return isTextResponse;
+    }
+
+    // Decodes response body as UTF-8 when no charset is specified in the
+    // Content-Type header. The underlying proxy library defaults to
+    // ISO-8859-1 per the obsolete RFC 2616, but modern standards (RFC 7231,
+    // RFC 8259) treat UTF-8 as the default for JSON and most web content.
+    private static string GetBodyString(string? contentType, byte[] body)
+    {
+        if (contentType is not null &&
+            contentType.IndexOf("charset=", StringComparison.OrdinalIgnoreCase) > -1)
+        {
+            // Charset is explicitly specified; let the caller handle it
+            // through the library's default decoding
+            return Encoding.GetEncoding(
+                contentType[(contentType.IndexOf("charset=", StringComparison.OrdinalIgnoreCase) + 8)..]
+                    .Split(';', ' ')[0]
+                    .Trim()
+            ).GetString(body);
+        }
+
+        return Encoding.UTF8.GetString(body);
     }
 
     protected override void Dispose(bool disposing)
