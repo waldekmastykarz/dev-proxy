@@ -66,10 +66,18 @@ sealed class GraphUtils(
             _logger.LogDebug("Getting permissions for {Method} {Url}", e.Method, e.Url);
             return $"{url}&requesturl={e.Url}&method={e.Method}";
         });
-        var tasks = urls.Select(u =>
+        var tasks = urls.Select(async u =>
         {
             _logger.LogTrace("Calling {Url}...", u);
-            return _httpClient.GetFromJsonAsync<GraphPermissionInfo[]>(u);
+            try
+            {
+                return await _httpClient.GetFromJsonAsync<GraphPermissionInfo[]>(u);
+            }
+            catch (HttpRequestException ex)
+            {
+                _logger.LogWarning(ex, "Failed to get permissions for {Url}", u);
+                return null;
+            }
         });
         _ = await Task.WhenAll(tasks);
 
