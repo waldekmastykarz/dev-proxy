@@ -45,10 +45,16 @@ sealed class VisualStudioCodeSnippet
 
 sealed class ConfigCommand : Command
 {
+    private enum ConfigFileFormat
+    {
+        Json,
+        Yaml
+    }
+
     private readonly ILogger _logger;
     private readonly IProxyConfiguration _proxyConfiguration;
     private readonly HttpClient _httpClient;
-    private readonly string snippetsFileUrl = $"https://aka.ms/devproxy/snippets/v{ProxyUtils.NormalizeVersion(ProxyUtils.ProductVersion)}";
+    private readonly string snippetsBaseUrl = $"https://aka.ms/devproxy/snippets/v{ProxyUtils.NormalizeVersion(ProxyUtils.ProductVersion)}";
     private readonly string configFileSnippetName = "ConfigFile";
     public ConfigCommand(
         HttpClient httpClient,
@@ -147,15 +153,20 @@ sealed class ConfigCommand : Command
         var nameArgument = new Argument<string>("name")
         {
             Arity = ArgumentArity.ZeroOrOne,
-            DefaultValueFactory = _ => "devproxyrc.json",
-            Description = "Name of the configuration file"
+            Description = "Name of the configuration file. Defaults to devproxyrc.json (or devproxyrc.yaml with --format yaml)."
+        };
+        var formatOption = new Option<ConfigFileFormat?>("--format")
+        {
+            Description = "Configuration format to use (json or yaml)"
         };
         configNewCommand.Add(nameArgument);
+        configNewCommand.Add(formatOption);
         configNewCommand.SetAction(async (parseResult) =>
         {
-            var name = parseResult.GetValue(nameArgument) ?? "devproxyrc.json";
+            var format = parseResult.GetValue(formatOption);
+            var name = parseResult.GetValue(nameArgument) ?? GetDefaultConfigFileName(format);
             var outputFormat = parseResult.GetValueOrDefault<OutputFormat?>(DevProxyCommand.OutputOptionName) ?? OutputFormat.Text;
-            await CreateConfigFileAsync(name, outputFormat);
+            await CreateConfigFileAsync(name, format, outputFormat);
         });
 
         var configOpenCommand = new Command("open", "Open devproxyrc.json");
@@ -193,6 +204,7 @@ sealed class ConfigCommand : Command
 
         HelpExamples.Add(this, [
             "devproxy config new                                 Create default devproxyrc.json",
+            "devproxy config new --format yaml                   Create default devproxyrc.yaml",
             "devproxy config new myconfig.json                   Create named config file",
             "devproxy config get <config-id>                     Download config from gallery",
             "devproxy config open                                Open config in default editor",
@@ -438,11 +450,13 @@ sealed class ConfigCommand : Command
         }
     }
 
-    private async Task CreateConfigFileAsync(string name, OutputFormat outputFormat)
+    private async Task CreateConfigFileAsync(string name, ConfigFileFormat? format, OutputFormat outputFormat)
     {
         try
         {
-            var snippets = await DownloadSnippetsAsync();
+            var selectedFormat = format ?? GetConfigFileFormatFromFileName(name);
+
+            var snippets = await DownloadSnippetsAsync(selectedFormat);
             if (snippets is null)
             {
                 return;
@@ -467,6 +481,7 @@ sealed class ConfigCommand : Command
             }
 
             var snippetBody = GetSnippetBody(snippet.Body);
+
             var targetFileName = GetTargetFileName(name);
             await File.WriteAllTextAsync(targetFileName, snippetBody);
 
@@ -492,8 +507,19 @@ sealed class ConfigCommand : Command
         }
     }
 
-    private async Task<Dictionary<string, VisualStudioCodeSnippet>?> DownloadSnippetsAsync()
+    private static string GetDefaultConfigFileName(ConfigFileFormat? format) =>
+        format == ConfigFileFormat.Yaml ? "devproxyrc.yaml" : "devproxyrc.json";
+
+    private static ConfigFileFormat GetConfigFileFormatFromFileName(string name)
     {
+        var extension = Path.GetExtension(name).ToLowerInvariant();
+        return extension is ".yaml" or ".yml" ? ConfigFileFormat.Yaml : ConfigFileFormat.Json;
+    }
+
+    private async Task<Dictionary<string, VisualStudioCodeSnippet>?> DownloadSnippetsAsync(ConfigFileFormat format)
+    {
+        var formatSuffix = format == ConfigFileFormat.Yaml ? "yaml" : "json";
+        var snippetsFileUrl = $"{snippetsBaseUrl}/{formatSuffix}";
         _logger.LogDebug("Downloading snippets from {SnippetsFileUrl}...", snippetsFileUrl);
         var response = await _httpClient.GetAsync(new Uri(snippetsFileUrl));
         if (response.IsSuccessStatusCode)
