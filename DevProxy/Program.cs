@@ -163,13 +163,25 @@ static async Task<int> StartDetachedProcessAsync(string[] args)
             await Task.Delay(200);
 
             var state = await StateManager.LoadStateByPidAsync(process.Id);
-            if (state != null)
+            if (state is { Port: > 0 } && !string.IsNullOrEmpty(state.ApiUrl) && !state.ApiUrl.EndsWith(":0", StringComparison.Ordinal))
             {
+                Uri? apiUri = null;
+                if (!string.IsNullOrWhiteSpace(state.ApiUrl))
+                {
+                    Uri.TryCreate(state.ApiUrl, UriKind.Absolute, out apiUri);
+                }
+
+                // Build proxy URL in a way that correctly handles IPv6 hosts.
+                string hostForProxy = apiUri?.Host ?? IPAddress.Loopback.ToString();
+                var proxyUriBuilder = new UriBuilder(Uri.UriSchemeHttp, hostForProxy, state.Port);
+                var proxyUrl = proxyUriBuilder.Uri.ToString().TrimEnd('/');
+
                 if (isJsonOutput)
                 {
                     await Console.Out.WriteLineAsync(FormatJsonResultEntry(new
                     {
                         state.Pid,
+                        ProxyUrl = proxyUrl,
                         state.ApiUrl,
                         state.LogFile
                     }));
@@ -179,6 +191,7 @@ static async Task<int> StartDetachedProcessAsync(string[] args)
                     await Console.Out.WriteLineAsync("Dev Proxy started in background.");
                     await Console.Out.WriteLineAsync();
                     await Console.Out.WriteLineAsync($"  PID:       {state.Pid}");
+                    await Console.Out.WriteLineAsync($"  Proxy URL: {proxyUrl}");
                     await Console.Out.WriteLineAsync($"  API URL:   {state.ApiUrl}");
                     await Console.Out.WriteLineAsync($"  Log file:  {state.LogFile}");
                     await Console.Out.WriteLineAsync();
