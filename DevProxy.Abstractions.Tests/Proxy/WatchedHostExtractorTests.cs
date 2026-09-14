@@ -44,6 +44,17 @@ public class WatchedHostExtractorTests
     public void ToHostRegex_NoPath_NoTrailingSlash() =>
         Assert.Equal("^api\\.contoso\\.com$", HostPattern("https://api.contoso.com"));
 
+    [Fact]
+    public void ToHostRegex_HandlesBracketedIpv6WithPort() =>
+        Assert.Equal("^::1$", HostPattern("https://[::1]:443/*"));
+
+    [Theory]
+    [InlineData("https://api.contoso.com/*", true)]
+    [InlineData("https://api.contoso.com", true)]
+    [InlineData("https://api.contoso.com/private/*", false)]
+    public void IsHostWide_ClassifiesPathScope(string urlPattern, bool expected) =>
+        Assert.Equal(expected, WatchedHostExtractor.IsHostWide(ToUrlRegex(urlPattern)));
+
     [Theory]
     [InlineData("https://jsonplaceholder.typicode.com/*", "jsonplaceholder.typicode.com", true)]
     [InlineData("https://jsonplaceholder.typicode.com/*", "example.com", false)]

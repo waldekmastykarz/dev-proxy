@@ -56,14 +56,46 @@ public static class WatchedHostExtractor
             host = pattern;
         }
 
-        // Drop a trailing :port — matching is on host only.
-        var portPos = host.IndexOf(':', StringComparison.OrdinalIgnoreCase);
-        if (portPos > 0)
+        // Drop IPv6 brackets and a trailing port — matching is on host only.
+        if (host.Length > 0 && host[0] == '[')
         {
-            host = host[..portPos];
+            var closingBracket = host.IndexOf(']', StringComparison.Ordinal);
+            if (closingBracket > 0)
+            {
+                host = host[1..closingBracket];
+            }
+        }
+        else
+        {
+            var portPos = host.IndexOf(':', StringComparison.OrdinalIgnoreCase);
+            if (portPos > 0)
+            {
+                host = host[..portPos];
+            }
         }
 
         var regexString = Regex.Escape(host).Replace("\\*", ".*", StringComparison.OrdinalIgnoreCase);
         return new Regex($"^{regexString}$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>
+    /// Whether a watched-URL regex applies to every path on its authority. Only such
+    /// exclusions can safely affect the host-only CONNECT decision.
+    /// </summary>
+    public static bool IsHostWide(Regex urlRegex)
+    {
+        ArgumentNullException.ThrowIfNull(urlRegex);
+
+        var pattern = Regex.Unescape(urlRegex.ToString())
+            .Trim('^', '$')
+            .Replace(".*", "*", StringComparison.OrdinalIgnoreCase);
+        var scheme = pattern.IndexOf("://", StringComparison.OrdinalIgnoreCase);
+        if (scheme < 0)
+        {
+            return true;
+        }
+
+        var pathStart = pattern.IndexOf('/', scheme + 3);
+        return pathStart < 0 || pattern[pathStart..] is "/" or "/*";
     }
 }

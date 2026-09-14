@@ -28,13 +28,14 @@
             "HEAD",
             "OPTIONS",
             "CONNECT",
-            "TRACE"
+            "TRACE",
+            "QUERY"
           ],
           "description": "HTTP method to use (default: POST)."
         },
         "body": {
-          "type": ["object", "string"],
-          "description": "Body of the request (object or string)."
+          "type": ["object", "array", "string", "number", "boolean"],
+          "description": "Body of the request."
         },
         "headers": {
           "type": "array",

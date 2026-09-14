@@ -81,6 +81,25 @@ public class Http1ConnectionReaderTests
     }
 
     [Fact]
+    public async Task ReadBodyAsync_Throws_OnPrematureEof()
+    {
+        var reader = ReaderOver("abc");
+
+        _ = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await reader.ReadBodyAsync(5, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ReadBodyAsync_Throws_BeforeAllocatingOversizedBody()
+    {
+        var reader = ReaderOver("");
+
+        _ = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await reader.ReadBodyAsync(
+                Http1ConnectionReader.MaxBufferedBodyBytes + 1, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task KeepAlive_ReadsTwoPipelinedRequestsFromOneBuffer()
     {
         // Both requests (with bodies) arrive back-to-back in a single buffer. The

@@ -105,26 +105,23 @@ internal sealed class WebSocketRelay(ILogger logger)
             return true; // origin was reachable, just closed early
         }
 
-        var (statusCode, reason, headers, rawHead, leftover) = head.Value;
+        var (statusCode, reason, headers, _, leftover) = head.Value;
 
         var response = new MutableHttpResponse(
             (HttpStatusCode)statusCode, HttpVersion.Version11, headers, ReadOnlyMemory<byte>.Empty, reason);
         await onHandshakeResponse(response).ConfigureAwait(false);
 
-        // Write the origin's handshake response to the client verbatim.
-        await clientStream.WriteAsync(rawHead, ct).ConfigureAwait(false);
+        // Serialize the post-pipeline response so intentional status/header changes
+        // are reflected on the wire.
+        await clientStream.WriteAsync(BuildResponseHead(response), ct).ConfigureAwait(false);
         await clientStream.FlushAsync(ct).ConfigureAwait(false);
 
-        if (statusCode != (int)HttpStatusCode.SwitchingProtocols)
+        if (response.StatusCode != HttpStatusCode.SwitchingProtocols)
         {
             // Origin declined the upgrade. There's no tunnel to splice. Forward any
             // bytes already read past the response head (e.g. the start of an error
             // body) so the client sees the full non-101 response, then close.
-            if (leftover.Length > 0)
-            {
-                await clientStream.WriteAsync(leftover, ct).ConfigureAwait(false);
-                await clientStream.FlushAsync(ct).ConfigureAwait(false);
-            }
+            await ForwardToEndAsync(originStream, clientStream, leftover, ct).ConfigureAwait(false);
             logger.LogDebug("WebSocket origin {Host} declined upgrade with {Status}", origin.Host, statusCode);
             return true;
         }
@@ -218,12 +215,14 @@ internal sealed class WebSocketRelay(ILogger logger)
         foreach (var header in request.Headers)
         {
             if (string.Equals(header.Name, "Proxy-Connection", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(header.Name, "Proxy-Authorization", StringComparison.OrdinalIgnoreCase))
+                || string.Equals(header.Name, "Proxy-Authorization", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(header.Name, "Host", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
             _ = builder.Append(CultureInfo.InvariantCulture, $"{header.Name}: {header.Value}\r\n");
         }
+        _ = builder.Append(CultureInfo.InvariantCulture, $"Host: {target.Authority}\r\n");
         _ = builder.Append("\r\n");
 
         await origin.WriteAsync(Encoding.ASCII.GetBytes(builder.ToString()), ct).ConfigureAwait(false);
@@ -319,6 +318,33 @@ internal sealed class WebSocketRelay(ILogger logger)
         return (statusCode, reason, headers);
     }
 
+    private static byte[] BuildResponseHead(MutableHttpResponse response)
+    {
+        var reason = response.StatusDescription ?? response.StatusCode.ToString();
+        var builder = new StringBuilder()
+            .Append(CultureInfo.InvariantCulture, $"HTTP/1.1 {(int)response.StatusCode} {reason}\r\n");
+        foreach (var header in response.Headers)
+        {
+            _ = builder.Append(CultureInfo.InvariantCulture, $"{header.Name}: {header.Value}\r\n");
+        }
+        _ = builder.Append("\r\n");
+        return Encoding.ASCII.GetBytes(builder.ToString());
+    }
+
+    private static async Task ForwardToEndAsync(
+        Stream origin,
+        Stream client,
+        byte[] leftover,
+        CancellationToken ct)
+    {
+        if (leftover.Length > 0)
+        {
+            await client.WriteAsync(leftover, ct).ConfigureAwait(false);
+        }
+        await origin.CopyToAsync(client, ct).ConfigureAwait(false);
+        await client.FlushAsync(ct).ConfigureAwait(false);
+    }
+
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(30);
     private const int ReceiveChunkSize = 8 * 1024;
 
@@ -399,25 +425,19 @@ internal sealed class WebSocketRelay(ILogger logger)
             }
 
             var data = message.Value;
+            onMessage?.Invoke(new WebSocketMessageRecord(
+                WebSocketMessageDirection.Send, result.MessageType, data, DateTimeOffset.UtcNow));
 
             // Offer to interceptor before forwarding.
             if (interceptor is not null && clientConnection is not null)
             {
                 var wsMessage = new WebSocketMessage(result.MessageType, data);
                 var handled = await interceptor(wsMessage, clientConnection, ct).ConfigureAwait(false);
-                onMessage?.Invoke(new WebSocketMessageRecord(
-                    WebSocketMessageDirection.Send, result.MessageType, data, DateTimeOffset.UtcNow));
                 if (handled)
                 {
                     continue; // don't forward to origin
                 }
             }
-            else
-            {
-                onMessage?.Invoke(new WebSocketMessageRecord(
-                    WebSocketMessageDirection.Send, result.MessageType, data, DateTimeOffset.UtcNow));
-            }
-
             await origin.SendAsync(data, result.MessageType, endOfMessage: true, ct).ConfigureAwait(false);
         }
     }

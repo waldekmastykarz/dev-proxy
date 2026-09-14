@@ -35,6 +35,11 @@ public class Http1RequestReaderTests
     }
 
     [Fact]
+    public void ParseHead_Throws_OnMalformedHeaderLine() =>
+        Assert.Throws<InvalidOperationException>(() =>
+            Http1RequestReader.ParseHead("POST / HTTP/1.1\r\nContent-Length 5"));
+
+    [Fact]
     public void GetContentLength_ReadsHeaderCaseInsensitively()
     {
         var headers = new List<(string Name, string Value)>
@@ -53,6 +58,24 @@ public class Http1RequestReaderTests
 
         Assert.Equal(0, Http1RequestReader.GetContentLength(headers));
     }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("nope")]
+    [InlineData("2147483648")]
+    public void GetContentLength_Throws_OnInvalidValue(string value) =>
+        Assert.Throws<InvalidOperationException>(() =>
+            Http1RequestReader.GetContentLength([("Content-Length", value)]));
+
+    [Fact]
+    public void GetContentLength_Throws_OnConflictingDuplicates() =>
+        Assert.Throws<InvalidOperationException>(() =>
+            Http1RequestReader.GetContentLength([("Content-Length", "5"), ("Content-Length", "6")]));
+
+    [Fact]
+    public void GetContentLength_AllowsIdenticalDuplicates() =>
+        Assert.Equal(5, Http1RequestReader.GetContentLength(
+            [("Content-Length", "5"), ("Content-Length", "5")]));
 
     [Fact]
     public void IndexOfDoubleCrlf_FindsTerminator()
@@ -89,12 +112,22 @@ public class Http1RequestReaderTests
     [Theory]
     [InlineData("chunked")]
     [InlineData("Chunked")]
-    [InlineData("gzip, chunked")]
     public void DetectBodyFraming_Chunked_WhenTransferEncodingChunked(string transferEncoding)
     {
         var headers = new List<(string Name, string Value)> { ("Transfer-Encoding", transferEncoding) };
 
         Assert.Equal(RequestBodyFraming.Chunked, Http1RequestReader.DetectBodyFraming(headers));
+    }
+
+    [Theory]
+    [InlineData("gzip")]
+    [InlineData("gzip, chunked")]
+    [InlineData("chunked, gzip")]
+    public void DetectBodyFraming_Invalid_WhenTransferEncodingUnsupported(string transferEncoding)
+    {
+        var headers = new List<(string Name, string Value)> { ("Transfer-Encoding", transferEncoding) };
+
+        Assert.Equal(RequestBodyFraming.Invalid, Http1RequestReader.DetectBodyFraming(headers));
     }
 
     [Fact]

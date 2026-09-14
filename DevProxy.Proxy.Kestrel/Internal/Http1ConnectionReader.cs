@@ -37,6 +37,7 @@ namespace DevProxy.Proxy.Kestrel.Internal;
 /// </summary>
 internal sealed class Http1ConnectionReader(Stream stream)
 {
+    internal const int MaxBufferedBodyBytes = 256 * 1024 * 1024;
     private const int ReadChunkBytes = 4096;
     private const int MaxChunkLineBytes = 64 * 1024;
     private byte[] _pending = [];
@@ -88,6 +89,10 @@ internal sealed class Http1ConnectionReader(Stream stream)
         {
             return [];
         }
+        if (contentLength > MaxBufferedBodyBytes)
+        {
+            throw new InvalidOperationException("Request body too large.");
+        }
 
         var body = new byte[contentLength];
         var fromPending = TakeFromPending(Math.Min(_pending.Length, contentLength));
@@ -99,7 +104,7 @@ internal sealed class Http1ConnectionReader(Stream stream)
             var read = await stream.ReadAsync(body.AsMemory(offset, contentLength - offset), ct).ConfigureAwait(false);
             if (read == 0)
             {
-                break;
+                throw new InvalidOperationException("Unexpected end of stream while reading request body.");
             }
             offset += read;
         }
@@ -152,6 +157,10 @@ internal sealed class Http1ConnectionReader(Stream stream)
             }
 
             var chunk = await ReadExactlyAsync(size, ct).ConfigureAwait(false);
+            if (body.Count > MaxBufferedBodyBytes - chunk.Length)
+            {
+                throw new InvalidOperationException("Request body too large.");
+            }
             body.AddRange(chunk);
 
             var crlf = await ReadExactlyAsync(2, ct).ConfigureAwait(false);

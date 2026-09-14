@@ -70,7 +70,12 @@ public class WebSocketMockResponderTests
         var responder = new WebSocketMockResponder(NullLogger.Instance);
         var serverTask = responder.RespondAsync(
             proxySide, request, Handler,
-            r => { observedHandshake = r; return Task.CompletedTask; },
+            r =>
+            {
+                observedHandshake = r;
+                r.Headers.Add("X-Observed", "yes");
+                return Task.CompletedTask;
+            },
             cts.Token);
 
         // ── client: read + verify the raw 101 (one byte at a time, no over-read) ──
@@ -78,6 +83,7 @@ public class WebSocketMockResponderTests
         Assert.StartsWith("HTTP/1.1 101 Switching Protocols", head, StringComparison.Ordinal);
         Assert.Contains($"Sec-WebSocket-Accept: {ExpectedAccept}", head, StringComparison.Ordinal);
         Assert.Contains("Upgrade: websocket", head, StringComparison.Ordinal);
+        Assert.Contains("X-Observed: yes", head, StringComparison.Ordinal);
 
         // onHandshakeResponse fired with the parsed 101 (so the pipeline/req-log can run).
         Assert.NotNull(observedHandshake);

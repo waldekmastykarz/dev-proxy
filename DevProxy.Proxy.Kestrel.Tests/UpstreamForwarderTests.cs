@@ -98,9 +98,51 @@ public class UpstreamForwarderTests
         Assert.Null(origin.BodyStream);
     }
 
+    [Fact]
+    public async Task ForwardAsync_StripsHeadersNamedByRequestConnection()
+    {
+        HttpRequestMessage? captured = null;
+        var handler = new DelegateHandler(request =>
+        {
+            captured = request;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([]) };
+        });
+        var headers = new HeaderCollection();
+        headers.Add("Connection", "X-Internal");
+        headers.Add("X-Internal", "secret");
+        var request = new MutableHttpRequest(
+            "GET", new Uri("https://origin.test/"), HttpVersion.Version11, headers, ReadOnlyMemory<byte>.Empty);
+
+        await using var origin = await new UpstreamForwarder(new HttpClient(handler))
+            .ForwardAsync(request, CancellationToken.None);
+
+        Assert.NotNull(captured);
+        Assert.False(captured!.Headers.Contains("X-Internal"));
+    }
+
+    [Fact]
+    public async Task ForwardAsync_StripsHeadersNamedByResponseConnection()
+    {
+        var message = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([]) };
+        message.Headers.TryAddWithoutValidation("Connection", "X-Internal");
+        message.Headers.TryAddWithoutValidation("X-Internal", "secret");
+
+        await using var origin = await ForwarderReturning(message).ForwardAsync(Request(), CancellationToken.None);
+
+        Assert.Null(origin.Response.Headers.GetFirst("X-Internal"));
+    }
+
     private sealed class StubHandler(HttpResponseMessage response) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
             Task.FromResult(response);
+    }
+
+    private sealed class DelegateHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(send(request));
     }
 }

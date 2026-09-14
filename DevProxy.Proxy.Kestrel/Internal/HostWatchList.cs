@@ -25,6 +25,14 @@ internal sealed class HostWatchList
         var hosts = new List<UrlToWatch>();
         foreach (var urlToWatch in urlsToWatch)
         {
+            // CONNECT carries only an authority. A path-scoped exclusion cannot be
+            // decided until the decrypted request is parsed, so keep the host eligible
+            // for MITM and let PluginPipeline apply the full URL pattern later.
+            if (urlToWatch.Exclude && !WatchedHostExtractor.IsHostWide(urlToWatch.Url))
+            {
+                continue;
+            }
+
             var regex = WatchedHostExtractor.ToHostRegex(urlToWatch.Url);
 
             if (!hosts.Exists(h => h.Url.ToString() == regex.ToString()))

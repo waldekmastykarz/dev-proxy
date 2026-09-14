@@ -285,12 +285,12 @@ internal sealed class ProxyConnectionHandler(
         }
 
         var framing = Http1RequestReader.DetectBodyFraming(head.Headers);
-        if (framing == RequestBodyFraming.Conflicting)
+        if (framing is RequestBodyFraming.Conflicting or RequestBodyFraming.Invalid)
         {
             // Content-Length and chunked Transfer-Encoding disagree on where the body
             // ends — a request-smuggling vector (RFC 9112 §6.3.3). Refuse it.
             await WriteErrorAsync(clientStream, HttpStatusCode.BadRequest,
-                "Conflicting Content-Length and Transfer-Encoding", ct).ConfigureAwait(false);
+                "Invalid request body framing", ct).ConfigureAwait(false);
             return false;
         }
 
@@ -323,6 +323,17 @@ internal sealed class ProxyConnectionHandler(
         foreach (var (name, value) in head.Headers)
         {
             headers.Add(name, value);
+        }
+
+        try
+        {
+            body = DecodeRequestBody(body, headers);
+        }
+        catch (InvalidOperationException ex)
+        {
+            logger.LogWarning(ex, "Unsupported or invalid request content encoding");
+            await WriteErrorAsync(clientStream, HttpStatusCode.BadRequest, "Invalid request content encoding", ct).ConfigureAwait(false);
+            return false;
         }
 
         var version = ParseHttpVersion(head.Version);
@@ -394,7 +405,7 @@ internal sealed class ProxyConnectionHandler(
                 }
                 else
                 {
-                    var relayed = await _webSocketRelay.RelayAsync(clientStream, request, requestUri, OnHandshakeAsync,
+                    var relayed = await _webSocketRelay.RelayAsync(clientStream, request, request.RequestUri, OnHandshakeAsync,
                         onMessage,
                         session.WebSocketMessageInterceptor,
                         session.WebSocketOnConnected,
@@ -439,6 +450,8 @@ internal sealed class ProxyConnectionHandler(
                     session.SetOriginResponse(new MutableHttpResponse(
                         HttpStatusCode.BadGateway, HttpVersion.Version11, new HeaderCollection(), ReadOnlyMemory<byte>.Empty));
                     await pipeline.RunResponseAsync(session, ct).ConfigureAwait(false);
+                    await ResponseWriter.WriteAsync(
+                        clientStream, session.MutableResponse!, keepAlive: false, head.Method, ct).ConfigureAwait(false);
                 }
                 else
                 {
@@ -496,6 +509,53 @@ internal sealed class ProxyConnectionHandler(
 
             return keepAlive;
         }
+    }
+
+    private static byte[] DecodeRequestBody(byte[] body, HeaderCollection headers)
+    {
+        var encodings = headers
+            .Where(h => string.Equals(h.Name, "Content-Encoding", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(h => h.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .ToArray();
+        if (encodings.Length == 0)
+        {
+            return body;
+        }
+
+        ReadOnlyMemory<byte> decoded = body;
+        for (var i = encodings.Length - 1; i >= 0; i--)
+        {
+            using var input = new MemoryStream(decoded.ToArray());
+            using Stream decoder = encodings[i].ToLowerInvariant() switch
+            {
+                "gzip" => new System.IO.Compression.GZipStream(input, System.IO.Compression.CompressionMode.Decompress),
+                "deflate" => new System.IO.Compression.DeflateStream(input, System.IO.Compression.CompressionMode.Decompress),
+                "br" => new System.IO.Compression.BrotliStream(input, System.IO.Compression.CompressionMode.Decompress),
+                "identity" => input,
+                _ => throw new InvalidOperationException($"Unsupported Content-Encoding '{encodings[i]}'."),
+            };
+            using var output = new MemoryStream();
+            var buffer = new byte[81920];
+            while (true)
+            {
+                var read = decoder.Read(buffer);
+                if (read == 0)
+                {
+                    break;
+                }
+                if (output.Length > Http1ConnectionReader.MaxBufferedBodyBytes - read)
+                {
+                    throw new InvalidOperationException("Decoded request body too large.");
+                }
+                output.Write(buffer, 0, read);
+            }
+            decoded = output.ToArray();
+        }
+
+        _ = headers.Remove("Content-Encoding");
+        _ = headers.Remove("Content-Length");
+        _ = headers.Remove("Transfer-Encoding");
+        return decoded.ToArray();
     }
 
     /// <summary>

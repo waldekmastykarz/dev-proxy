@@ -69,7 +69,7 @@ public class WebSocketRelayTests
         var (clientSide, proxySide) = await TestSockets.ConnectedPairAsync();
 
         var headers = new HeaderCollection();
-        headers.Add("Host", $"127.0.0.1:{originPort}");
+        headers.Add("Host", "stale.example.test");
         headers.Add("Upgrade", "websocket");
         headers.Add("Connection", "Upgrade");
         headers.Add("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
@@ -82,7 +82,12 @@ public class WebSocketRelayTests
         var relay = new WebSocketRelay(NullLogger.Instance);
         var relayTask = relay.RelayAsync(
             proxySide, request, request.RequestUri,
-            r => { observed = r; return Task.CompletedTask; },
+            r =>
+            {
+                observed = r;
+                r.Headers.Add("X-Observed", "yes");
+                return Task.CompletedTask;
+            },
             msg => capturedMessages.Enqueue(msg),
             messageInterceptor: null, onConnected: null, cts.Token);
 
@@ -90,6 +95,7 @@ public class WebSocketRelayTests
         var handshakeBack = await ReadUntilDoubleCrlfAsync(clientSide, cts.Token);
         Assert.StartsWith("HTTP/1.1 101 Switching Protocols", handshakeBack, StringComparison.Ordinal);
         Assert.Contains("Sec-WebSocket-Accept: abc123", handshakeBack, StringComparison.Ordinal);
+        Assert.Contains("X-Observed: yes", handshakeBack, StringComparison.Ordinal);
 
         // Wrap client side as a WebSocket to exchange proper frames.
         using var clientWs = WebSocket.CreateFromStream(
@@ -111,6 +117,8 @@ public class WebSocketRelayTests
         Assert.StartsWith("GET /chat?room=1 HTTP/1.1", replayed, StringComparison.Ordinal);
         Assert.Contains("Upgrade: websocket", replayed, StringComparison.Ordinal);
         Assert.Contains("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", replayed, StringComparison.Ordinal);
+        Assert.Contains($"Host: 127.0.0.1:{originPort}", replayed, StringComparison.Ordinal);
+        Assert.DoesNotContain("stale.example.test", replayed, StringComparison.Ordinal);
         Assert.DoesNotContain("Proxy-Connection", replayed, StringComparison.Ordinal);
 
         // onHandshakeResponse saw the parsed 101.

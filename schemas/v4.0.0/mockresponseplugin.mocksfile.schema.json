@@ -33,7 +33,8 @@
                   "HEAD",
                   "OPTIONS",
                   "CONNECT",
-                  "TRACE"
+                  "TRACE",
+                  "QUERY"
                 ],
                 "description": "HTTP method to match."
               },
@@ -58,9 +59,11 @@
                 "type": [
                   "object",
                   "array",
-                  "string"
+                  "string",
+                  "number",
+                  "boolean"
                 ],
-                "description": "The response body (object, array, or string; can reference a file with '@filename')."
+                "description": "The response body; string values can reference a file with '@filename'."
               },
               "statusCode": {
                 "type": "integer",

@@ -85,6 +85,18 @@ public class HostWatchListTests
     }
 
     [Fact]
+    public void IsWatched_PathExclusionDoesNotBlindTunnelWholeHost()
+    {
+        var list = HostWatchList.FromUrls(
+        [
+            ToWatch("!https://api.contoso.com/private/*"),
+            ToWatch("https://api.contoso.com/*"),
+        ]);
+
+        Assert.True(list.IsWatched("api.contoso.com"));
+    }
+
+    [Fact]
     public void IsWatched_GlobalWildcard_MatchesAnyHost()
     {
         var list = HostWatchList.FromUrls([ToWatch("https://*/*")]);

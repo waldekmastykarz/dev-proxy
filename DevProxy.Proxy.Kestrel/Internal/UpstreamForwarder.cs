@@ -38,9 +38,11 @@ internal sealed class UpstreamForwarder(HttpClient httpClient)
             outgoing.Content = content;
         }
 
+        var requestConnectionHeaders = GetConnectionHeaderNames(request.Headers);
         foreach (var header in request.Headers)
         {
             if (IsHopByHop(header.Name)
+                || requestConnectionHeaders.Contains(header.Name)
                 || string.Equals(header.Name, "Host", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(header.Name, "Expect", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(header.Name, "Content-Length", StringComparison.OrdinalIgnoreCase))
@@ -61,8 +63,9 @@ internal sealed class UpstreamForwarder(HttpClient httpClient)
         try
         {
             var headers = new HeaderCollection();
-            CopyHeaders(originResponse.Headers, headers);
-            CopyHeaders(originResponse.Content.Headers, headers);
+            var responseConnectionHeaders = GetConnectionHeaderNames(originResponse.Headers, originResponse.Content.Headers);
+            CopyHeaders(originResponse.Headers, headers, responseConnectionHeaders);
+            CopyHeaders(originResponse.Content.Headers, headers, responseConnectionHeaders);
 
             // A HEAD response has no body but reports the Content-Length a GET would —
             // keep it so the client sees the real resource size (RFC 9110 §9.3.2). It
@@ -100,7 +103,7 @@ internal sealed class UpstreamForwarder(HttpClient httpClient)
 
             // AutomaticDecompression on the shared handler means the bytes here are
             // already decompressed; the Content-Encoding header is removed for us.
-            var body = await originResponse.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            var body = await ReadBodyAsync(originResponse.Content, ct).ConfigureAwait(false);
             var response = new MutableHttpResponse(
                 originResponse.StatusCode,
                 originResponse.Version,
@@ -120,11 +123,39 @@ internal sealed class UpstreamForwarder(HttpClient httpClient)
         headers.GetFirst("Content-Type")?.Value
             .Contains("text/event-stream", StringComparison.OrdinalIgnoreCase) == true;
 
-    private static void CopyHeaders(System.Net.Http.Headers.HttpHeaders source, HeaderCollection destination)
+    private static async Task<byte[]> ReadBodyAsync(HttpContent content, CancellationToken ct)
+    {
+        if (content.Headers.ContentLength > Http1ConnectionReader.MaxBufferedBodyBytes)
+        {
+            throw new InvalidOperationException("Origin response body too large.");
+        }
+
+        await using var source = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var destination = new MemoryStream();
+        var buffer = new byte[81920];
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer, ct).ConfigureAwait(false);
+            if (read == 0)
+            {
+                return destination.ToArray();
+            }
+            if (destination.Length > Http1ConnectionReader.MaxBufferedBodyBytes - read)
+            {
+                throw new InvalidOperationException("Origin response body too large.");
+            }
+            await destination.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+        }
+    }
+
+    private static void CopyHeaders(
+        System.Net.Http.Headers.HttpHeaders source,
+        HeaderCollection destination,
+        HashSet<string> connectionHeaders)
     {
         foreach (var header in source)
         {
-            if (IsHopByHop(header.Key))
+            if (IsHopByHop(header.Key) || connectionHeaders.Contains(header.Key))
             {
                 continue;
             }
@@ -135,6 +166,21 @@ internal sealed class UpstreamForwarder(HttpClient httpClient)
             }
         }
     }
+
+    private static HashSet<string> GetConnectionHeaderNames(IHeaderCollection headers) =>
+        headers
+            .Where(h => string.Equals(h.Name, "Connection", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(h => h.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    private static HashSet<string> GetConnectionHeaderNames(
+        System.Net.Http.Headers.HttpHeaders headers,
+        System.Net.Http.Headers.HttpHeaders contentHeaders) =>
+        headers.Concat(contentHeaders)
+            .Where(h => string.Equals(h.Key, "Connection", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(h => h.Value)
+            .SelectMany(v => v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     private static bool IsHopByHop(string name) => ForwardingInvariants.HopByHopHeaders.Contains(name);
 }

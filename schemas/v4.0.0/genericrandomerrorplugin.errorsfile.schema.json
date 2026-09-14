@@ -33,7 +33,8 @@
                   "HEAD",
                   "OPTIONS",
                   "CONNECT",
-                  "TRACE"
+                  "TRACE",
+                  "QUERY"
                 ],
                 "description": "HTTP method to match for the request. Optional."
               },
@@ -56,9 +57,11 @@
                   "type": [
                     "object",
                     "array",
-                    "string"
+                    "string",
+                    "number",
+                    "boolean"
                   ],
-                  "description": "Response body to return. Can be an object, array, or string."
+                  "description": "Response body to return."
                 },
                 "statusCode": {
                   "type": "integer",

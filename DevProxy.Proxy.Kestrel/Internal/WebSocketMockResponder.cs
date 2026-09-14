@@ -72,14 +72,28 @@ internal sealed class WebSocketMockResponder(ILogger logger)
             .FirstOrDefault();
 
         var accept = ComputeAcceptKey(key);
-        var (rawHead, headers) = BuildHandshakeResponse(accept, subProtocol);
+        var (_, headers) = BuildHandshakeResponse(accept, subProtocol);
 
         var response = new MutableHttpResponse(
             HttpStatusCode.SwitchingProtocols, HttpVersion.Version11, headers,
             ReadOnlyMemory<byte>.Empty, "Switching Protocols");
         await onHandshakeResponse(response).ConfigureAwait(false);
 
-        await WriteRawAsync(clientStream, rawHead, ct).ConfigureAwait(false);
+        if (response.StatusCode != HttpStatusCode.SwitchingProtocols)
+        {
+            await ResponseWriter.WriteAsync(
+                clientStream, response, keepAlive: false, request.Method, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Required handshake fields cannot be removed by response observers.
+        _ = response.Headers.Remove("Upgrade");
+        _ = response.Headers.Remove("Connection");
+        _ = response.Headers.Remove("Sec-WebSocket-Accept");
+        response.Headers.Add("Upgrade", "websocket");
+        response.Headers.Add("Connection", "Upgrade");
+        response.Headers.Add("Sec-WebSocket-Accept", accept);
+        await WriteRawAsync(clientStream, BuildResponseHead(response), ct).ConfigureAwait(false);
 
         // The stream now carries WebSocket frames; let the framework own the codec.
         // Ownership of the WebSocket transfers to FramedWebSocketConnection, which is
@@ -128,6 +142,19 @@ internal sealed class WebSocketMockResponder(ILogger logger)
 
     private static byte[] BuildBadRequest() => Encoding.ASCII.GetBytes(
         "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+
+    private static byte[] BuildResponseHead(MutableHttpResponse response)
+    {
+        var builder = new StringBuilder()
+            .Append(CultureInfo.InvariantCulture,
+                $"HTTP/1.1 {(int)response.StatusCode} {response.StatusDescription ?? response.StatusCode.ToString()}\r\n");
+        foreach (var header in response.Headers)
+        {
+            _ = builder.Append(CultureInfo.InvariantCulture, $"{header.Name}: {header.Value}\r\n");
+        }
+        _ = builder.Append("\r\n");
+        return Encoding.ASCII.GetBytes(builder.ToString());
+    }
 
     private static async Task WriteRawAsync(Stream stream, byte[] bytes, CancellationToken ct)
     {

@@ -40,6 +40,9 @@ internal enum RequestBodyFraming
     /// <summary>A <c>Transfer-Encoding: chunked</c> body.</summary>
     Chunked,
 
+    /// <summary>The framing headers are malformed or use unsupported transfer codings.</summary>
+    Invalid,
+
     /// <summary>
     /// Both <c>Content-Length</c> and <c>Transfer-Encoding: chunked</c> are present.
     /// The two disagree on where the body ends — a request-smuggling vector that a
@@ -76,9 +79,15 @@ internal static class Http1RequestReader
             var separator = lines[i].IndexOf(':', StringComparison.Ordinal);
             if (separator <= 0)
             {
-                continue;
+                throw new InvalidOperationException($"Malformed HTTP header line: '{lines[i]}'.");
             }
-            headers.Add((lines[i][..separator].Trim(), lines[i][(separator + 1)..].Trim()));
+
+            var name = lines[i][..separator].Trim();
+            if (name.Length == 0 || name.Any(char.IsWhiteSpace))
+            {
+                throw new InvalidOperationException($"Malformed HTTP header line: '{lines[i]}'.");
+            }
+            headers.Add((name, lines[i][(separator + 1)..].Trim()));
         }
 
         return new ParsedRequestHead(startLine[0], startLine[1], startLine[2], headers);
@@ -89,15 +98,26 @@ internal static class Http1RequestReader
     {
         ArgumentNullException.ThrowIfNull(headers);
 
+        int? contentLength = null;
         foreach (var (name, value) in headers)
         {
-            if (string.Equals(name, "Content-Length", StringComparison.OrdinalIgnoreCase)
-                && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+            if (!string.Equals(name, "Content-Length", StringComparison.OrdinalIgnoreCase))
             {
-                return parsed;
+                continue;
+            }
+
+            foreach (var token in value.Split(',', StringSplitOptions.TrimEntries))
+            {
+                if (!int.TryParse(token, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
+                    || parsed < 0
+                    || (contentLength.HasValue && contentLength.Value != parsed))
+                {
+                    throw new InvalidOperationException("Invalid or conflicting Content-Length header.");
+                }
+                contentLength = parsed;
             }
         }
-        return 0;
+        return contentLength ?? 0;
     }
 
     /// <summary>
@@ -110,20 +130,30 @@ internal static class Http1RequestReader
     {
         ArgumentNullException.ThrowIfNull(headers);
 
-        var hasContentLength = false;
-        var hasChunked = false;
-        foreach (var (name, value) in headers)
+        var hasContentLength = headers.Any(h =>
+            string.Equals(h.Name, "Content-Length", StringComparison.OrdinalIgnoreCase));
+        var transferCodings = headers
+            .Where(h => string.Equals(h.Name, "Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(h => h.Value.Split(',', StringSplitOptions.TrimEntries))
+            .ToArray();
+
+        try
         {
-            if (string.Equals(name, "Content-Length", StringComparison.OrdinalIgnoreCase))
-            {
-                hasContentLength = true;
-            }
-            else if (string.Equals(name, "Transfer-Encoding", StringComparison.OrdinalIgnoreCase)
-                && value.Contains("chunked", StringComparison.OrdinalIgnoreCase))
-            {
-                hasChunked = true;
-            }
+            _ = GetContentLength(headers);
         }
+        catch (InvalidOperationException)
+        {
+            return RequestBodyFraming.Invalid;
+        }
+
+        if (transferCodings.Length > 0
+            && (transferCodings.Length != 1
+                || !string.Equals(transferCodings[0], "chunked", StringComparison.OrdinalIgnoreCase)))
+        {
+            return RequestBodyFraming.Invalid;
+        }
+
+        var hasChunked = transferCodings.Length > 0;
 
         return (hasChunked, hasContentLength) switch
         {
