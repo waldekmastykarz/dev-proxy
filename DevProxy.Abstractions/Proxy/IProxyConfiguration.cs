@@ -49,4 +49,5 @@ public interface IProxyConfiguration
     bool ValidateSchemas { get; }
     IEnumerable<int> WatchPids { get; set; }
     IEnumerable<string> WatchProcessNames { get; set; }
+    bool WatchProcessTree { get; set; }
 }

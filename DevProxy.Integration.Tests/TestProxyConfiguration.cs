@@ -11,7 +11,7 @@ namespace DevProxy.Integration.Tests;
 /// <summary>
 /// Minimal <see cref="IProxyConfiguration"/> for the integration harness. Only the
 /// members the Kestrel engine reads at boot (Port, IPAddress, AsSystemProxy,
-/// WatchPids/WatchProcessNames) actually matter; the rest carry inert defaults.
+/// WatchPids/WatchProcessNames/WatchProcessTree) actually matter; the rest carry inert defaults.
 /// </summary>
 internal sealed class TestProxyConfiguration : IProxyConfiguration
 {
@@ -34,4 +34,5 @@ internal sealed class TestProxyConfiguration : IProxyConfiguration
     public bool ValidateSchemas => false;
     public IEnumerable<int> WatchPids { get; set; } = [];
     public IEnumerable<string> WatchProcessNames { get; set; } = [];
+    public bool WatchProcessTree { get; set; }
 }

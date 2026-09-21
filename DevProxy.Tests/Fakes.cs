@@ -89,4 +89,5 @@ internal sealed class FakeProxyConfiguration : IProxyConfiguration
     public bool ValidateSchemas => false;
     public IEnumerable<int> WatchPids { get; set; } = [];
     public IEnumerable<string> WatchProcessNames { get; set; } = [];
+    public bool WatchProcessTree { get; set; }
 }

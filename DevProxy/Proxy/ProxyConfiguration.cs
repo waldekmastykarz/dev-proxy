@@ -50,6 +50,7 @@ sealed class ProxyConfiguration : IProxyConfiguration
     public bool ValidateSchemas { get; set; } = true;
     public IEnumerable<int> WatchPids { get; set; } = [];
     public IEnumerable<string> WatchProcessNames { get; set; } = [];
+    public bool WatchProcessTree { get; set; }
 
     public ProxyConfiguration(IConfigurationRoot configurationRoot)
     {

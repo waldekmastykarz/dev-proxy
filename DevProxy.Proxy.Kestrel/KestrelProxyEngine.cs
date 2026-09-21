@@ -54,7 +54,10 @@ public sealed class KestrelProxyEngine(
         using var httpClient = new HttpClient(httpHandler, disposeHandler: false);
         var forwarder = new UpstreamForwarder(httpClient);
         var watchList = HostWatchList.FromUrls(urlsToWatch);
-        var processFilter = new ProcessFilter(configuration.WatchPids, configuration.WatchProcessNames);
+        var processFilter = new ProcessFilter(
+            configuration.WatchPids,
+            configuration.WatchProcessNames,
+            configuration.WatchProcessTree);
         var pipeline = new PluginPipeline(
             plugins,
             urlsToWatch,
