@@ -108,14 +108,18 @@ internal sealed class ProcessFilter
 
         var cacheKeys = new List<ProcessCacheKey>();
         var processKey = ResolveCacheKey(pid.Value);
-        if (processKey is not null)
+        if (processKey is null)
         {
-            if (TryGetCachedDecision(processKey.Value, out var cached))
-            {
-                return cached;
-            }
-            cacheKeys.Add(processKey.Value);
+            // Process start time is required to validate that each parent PID still
+            // identifies the process that originally created its child.
+            return false;
         }
+
+        if (TryGetCachedDecision(processKey.Value, out var cached))
+        {
+            return cached;
+        }
+        cacheKeys.Add(processKey.Value);
 
         var parentPids = _resolveParentPids();
         if (parentPids.Count == 0)
@@ -125,21 +129,28 @@ internal sealed class ProcessFilter
 
         var visited = new HashSet<int> { pid.Value };
         var currentPid = pid.Value;
+        var currentKey = processKey.Value;
         var isWatched = false;
         while (parentPids.TryGetValue(currentPid, out var parentPid) &&
                parentPid > 0 &&
                visited.Add(parentPid))
         {
             var parentKey = ResolveCacheKey(parentPid);
-            if (parentKey is not null)
+            if (parentKey is null ||
+                parentKey.Value.StartTimeUtcTicks > currentKey.StartTimeUtcTicks)
             {
-                if (TryGetCachedDecision(parentKey.Value, out var cached))
-                {
-                    isWatched = cached;
-                    break;
-                }
-                cacheKeys.Add(parentKey.Value);
+                // PROCESSENTRY32 and similar process tables retain only the creator PID.
+                // If that PID was reused after the child started, it is no longer an
+                // ancestor. Missing start times cannot establish a safe relationship.
+                break;
             }
+
+            if (TryGetCachedDecision(parentKey.Value, out cached))
+            {
+                isWatched = cached;
+                break;
+            }
+            cacheKeys.Add(parentKey.Value);
 
             if (_pids.Contains(parentPid) || MatchesProcessName(parentPid))
             {
@@ -148,6 +159,7 @@ internal sealed class ProcessFilter
             }
 
             currentPid = parentPid;
+            currentKey = parentKey.Value;
         }
 
         foreach (var key in cacheKeys)
@@ -218,7 +230,8 @@ internal sealed class ProcessFilter
     {
         try
         {
-            return Process.GetProcessById(pid).ProcessName;
+            using var process = Process.GetProcessById(pid);
+            return process.ProcessName;
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {
@@ -231,7 +244,8 @@ internal sealed class ProcessFilter
     {
         try
         {
-            return Process.GetProcessById(pid).StartTime.ToUniversalTime();
+            using var process = Process.GetProcessById(pid);
+            return process.StartTime.ToUniversalTime();
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {

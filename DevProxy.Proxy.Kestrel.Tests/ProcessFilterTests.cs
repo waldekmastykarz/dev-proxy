@@ -218,6 +218,41 @@ public class ProcessFilterTests
     }
 
     [Fact]
+    public void IsWatchedProcess_False_WhenAncestorPidWasReused()
+    {
+        var processStartTimes = new Dictionary<int, DateTimeOffset>
+        {
+            [300] = DateTimeOffset.UnixEpoch.AddMinutes(1),
+            // PID 100 is listed as the creator of 300, but the process currently
+            // owning that PID started later and is therefore unrelated.
+            [100] = DateTimeOffset.UnixEpoch.AddMinutes(2)
+        };
+        var filter = Filter(
+            names: ["Visual Studio Code"],
+            watchProcessTree: true,
+            resolvePid: _ => 300,
+            resolveName: pid => pid == 100 ? "Visual Studio Code" : "node",
+            resolveStartTime: pid => processStartTimes[pid],
+            resolveParentPids: () => new Dictionary<int, int> { [300] = 100 });
+
+        Assert.False(filter.IsWatchedProcess(54321));
+    }
+
+    [Fact]
+    public void IsWatchedProcess_False_WhenAncestorStartTimeCannotBeResolved()
+    {
+        var filter = Filter(
+            pids: [100],
+            watchProcessTree: true,
+            resolvePid: _ => 300,
+            resolveName: _ => null,
+            resolveStartTime: pid => pid == 300 ? DateTimeOffset.UnixEpoch : null,
+            resolveParentPids: () => new Dictionary<int, int> { [300] = 100 });
+
+        Assert.False(filter.IsWatchedProcess(54321));
+    }
+
+    [Fact]
     public void IsWatchedProcess_RefreshesExpiredCacheEntry()
     {
         var now = DateTimeOffset.UnixEpoch;
