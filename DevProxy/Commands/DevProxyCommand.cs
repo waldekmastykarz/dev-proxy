@@ -686,9 +686,10 @@ sealed class DevProxyCommand : RootCommand
             _proxyConfiguration.WatchProcessNames = watchProcessNames;
         }
         var watchProcessTree = parseResult.GetValueOrDefault<bool?>(WatchProcessTreeOptionName);
-        if (watchProcessTree is not null)
+        if (watchProcessTree is not null &&
+            _proxyConfiguration is IProcessTreeProxyConfiguration processTreeConfiguration)
         {
-            _proxyConfiguration.WatchProcessTree = watchProcessTree.Value;
+            processTreeConfiguration.WatchProcessTree = watchProcessTree.Value;
         }
         var noFirstRun = parseResult.GetValueOrDefault<bool?>(NoFirstRunOptionName);
         if (noFirstRun is not null)

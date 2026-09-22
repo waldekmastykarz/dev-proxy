@@ -57,7 +57,8 @@ public sealed class KestrelProxyEngine(
         var processFilter = new ProcessFilter(
             configuration.WatchPids,
             configuration.WatchProcessNames,
-            configuration.WatchProcessTree);
+            configuration is IProcessTreeProxyConfiguration processTreeConfiguration &&
+            processTreeConfiguration.WatchProcessTree);
         var pipeline = new PluginPipeline(
             plugins,
             urlsToWatch,
