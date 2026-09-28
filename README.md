@@ -8,11 +8,7 @@
 </h4>
 
 <p align="center">
-  <a href="https://bsky.app/profile/devproxy.bsky.social">
-    <img alt="Bluesky" src="https://img.shields.io/badge/bluesky-%40devproxy.bsky.social%E2%80%AC-blue?style=social&logo=bluesky&link=https%3A%2F%2Fbsky.app%2Fprofile%2Fdevproxy.bsky.social" />
-  </a>
-  <br />
-   <a href="https://youtube.com/@devproxy">
+  <a href="https://youtube.com/@devproxy">
     <img alt="YouTube" src="https://img.shields.io/badge/youTube-%40devproxy%E2%80%AC-red?style=social&logo=youtube&link=https%3A%2F%2Fyoutube.com%2F%40devproxy" />
   </a>
   <br />
