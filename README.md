@@ -4,7 +4,7 @@
 </h1>
 
 <h4 align="center">
-  Test the untestable
+  Test beyond the happy path
 </h4>
 
 <p align="center">
@@ -23,13 +23,13 @@
 
 # What is Dev Proxy?
 
-Dev Proxy is an API simulator that helps you effortlessly test your app beyond the happy path. Dev Proxy is a command-line tool that works on any platform. Because it intercepts network requests, it works with any type of app and tech stack.
+Dev Proxy is an API simulator that helps you test how your app handles errors, throttling, and slow responses, without changing a single line of code. Dev Proxy is a command-line tool that works on any platform. Because it intercepts network requests, it works with any language, framework, and API.
 
 Dev Proxy is **open source** and **free to use**.
 
-![Dev Proxy](./media/banner.png)
+[![Dev Proxy in 40 seconds](./media/showreel-thumbnail.jpg)](https://www.youtube.com/watch?v=kbTK0A4Psv0)
 
-You test your app to make sure it works as intended. But what if the APIs you use fail? Will your app lose your customer's data? How do you test for this? Simulating API failures is hard. You end up writing code that you won't be shipping or worse: not testing at all. That's why we built Dev Proxy, to simulate API errors so that you can easily test your app without changing your code.
+You test the happy path. Your users get the rest. What if the APIs you use fail or throttle you? Will your app lose your customers' data? How do you test for this? Simulating API failures is hard. You end up writing code that you won't be shipping or worse: not testing at all. That's why we built Dev Proxy, to simulate API errors so that you can easily test your app without changing your code.
 
 With Dev Proxy you:
 
@@ -37,6 +37,9 @@ With Dev Proxy you:
 - **Verify how your app handles API rate limits**, so that you can avoid getting throttled and **improve the user experience for your customers**.
 - **See how your app handles slow APIs**, so that you can implement the necessary affordances, and **make your app more user-friendly**.
 - **Quickly stand-up mock APIs** without writing a line of code, so that you can **focus on building your app instead of writing code you won't be shipping**.
+- **Test your AI apps** by routing OpenAI-compatible requests to a local language model and simulating LLM failures, so that you can **build reliable AI experiences without burning tokens**.
+- **Automate resilience testing in your CI/CD pipeline** with [GitHub Actions](https://github.com/dev-proxy-tools/actions), so that you can **catch issues before your customers do**.
+- **Configure Dev Proxy in plain English** using the [Dev Proxy MCP server](https://www.npmjs.com/package/@devproxy/mcp) with your AI coding agent, so that you can **get started in seconds**.
 - Improve your app with contextual guidance on how you use APIs, to **make your app even better**.
 
 ## Get started
