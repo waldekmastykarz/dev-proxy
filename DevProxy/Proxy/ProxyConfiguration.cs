@@ -8,11 +8,12 @@ using System.Text.Json.Serialization;
 
 namespace DevProxy.Proxy;
 
-sealed class ProxyConfiguration : IProxyConfiguration
+sealed class ProxyConfiguration : IProxyConfiguration, IProcessTreeProxyConfiguration
 {
     private readonly IConfigurationRoot _configurationRoot;
 
     public int ApiPort { get; set; } = 8897;
+    public string ApiIpAddress { get; set; } = "127.0.0.1";
     public bool AsSystemProxy { get; set; } = true;
     private bool configFileResolved;
     private string configFile = string.Empty;
@@ -50,6 +51,7 @@ sealed class ProxyConfiguration : IProxyConfiguration
     public bool ValidateSchemas { get; set; } = true;
     public IEnumerable<int> WatchPids { get; set; } = [];
     public IEnumerable<string> WatchProcessNames { get; set; } = [];
+    public bool WatchProcessTree { get; set; }
 
     public ProxyConfiguration(IConfigurationRoot configurationRoot)
     {

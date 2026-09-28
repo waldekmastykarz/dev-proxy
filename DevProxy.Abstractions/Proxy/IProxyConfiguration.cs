@@ -29,6 +29,7 @@ public enum OutputFormat
 public interface IProxyConfiguration
 {
     int ApiPort { get; set; }
+    string ApiIpAddress { get; set; }
     bool AsSystemProxy { get; set; }
     string ConfigFile { get; }
 #pragma warning disable CA2227
@@ -49,4 +50,9 @@ public interface IProxyConfiguration
     bool ValidateSchemas { get; }
     IEnumerable<int> WatchPids { get; set; }
     IEnumerable<string> WatchProcessNames { get; set; }
+}
+
+public interface IProcessTreeProxyConfiguration
+{
+    bool WatchProcessTree { get; set; }
 }
