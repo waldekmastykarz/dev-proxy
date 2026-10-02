@@ -53,6 +53,73 @@ public sealed class ManipulationAndMockingIntegrationTests
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
     }
 
+    [Theory]
+    [InlineData("original")]
+    [InlineData(null)]
+    public async Task Rewrite_SetsRequestHeader_WhenUrlMatches(string? originalValue)
+    {
+        await using var origin = await FakeOrigin.StartAsync();
+        var urls = KestrelProxyHarness.BuildUrlsToWatch(origin.Host);
+        var config = PluginConfig.FromJson("""
+            {
+              "rewrites": [
+                { "in": { "url": "/headers$" }, "out": { "headers": [ { "name": "x-probe", "value": "rewritten" } ] } }
+              ]
+            }
+            """);
+        var plugin = new RewritePlugin(
+            SharedHttpClient,
+            NullLogger<RewritePlugin>.Instance,
+            urls,
+            ProxyConfig,
+            config);
+
+        await using var proxy = await KestrelProxyHarness.StartAsync(origin.Host, [plugin]);
+        using var client = proxy.CreateHttpClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri($"http://{origin.Host}/headers"));
+        if (originalValue is not null)
+        {
+            request.Headers.Add("X-Probe", originalValue);
+        }
+
+        using var response = await client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("probe=rewritten", body);
+        Assert.Contains(origin.ReceivedRequests, r => r.PathAndQuery == "/headers");
+    }
+
+    [Fact]
+    public async Task Rewrite_LeavesRequestHeader_WhenUrlDoesNotMatch()
+    {
+        await using var origin = await FakeOrigin.StartAsync();
+        var urls = KestrelProxyHarness.BuildUrlsToWatch(origin.Host);
+        var config = PluginConfig.FromJson("""
+            {
+              "rewrites": [
+                { "in": { "url": "/other$" }, "out": { "headers": [ { "name": "X-Probe", "value": "rewritten" } ] } }
+              ]
+            }
+            """);
+        var plugin = new RewritePlugin(
+            SharedHttpClient,
+            NullLogger<RewritePlugin>.Instance,
+            urls,
+            ProxyConfig,
+            config);
+
+        await using var proxy = await KestrelProxyHarness.StartAsync(origin.Host, [plugin]);
+        using var client = proxy.CreateHttpClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri($"http://{origin.Host}/headers"));
+        request.Headers.Add("X-Probe", "original");
+
+        using var response = await client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal("probe=original", body);
+    }
+
     [Fact]
     public async Task Rewrite_RewritesWebSocketUrl_OriginReceivesRewrittenPath()
     {

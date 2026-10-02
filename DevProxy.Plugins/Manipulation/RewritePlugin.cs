@@ -12,9 +12,16 @@ using System.Text.RegularExpressions;
 
 namespace DevProxy.Plugins.Manipulation;
 
+public sealed class RewriteHeader
+{
+    public string? Name { get; set; }
+    public string? Value { get; set; }
+}
+
 public sealed class RewriteRule
 {
     public string? Url { get; set; }
+    public IEnumerable<RewriteHeader>? Headers { get; set; }
 }
 
 public sealed class RequestRewrite
@@ -82,22 +89,53 @@ public sealed class RewritePlugin(
 
         foreach (var rewrite in Configuration.Rewrites)
         {
-            if (string.IsNullOrEmpty(rewrite.In?.Url) ||
-                string.IsNullOrEmpty(rewrite.Out?.Url))
+            if (string.IsNullOrEmpty(rewrite.In?.Url) || rewrite.Out is null)
             {
                 continue;
             }
 
-            var newUrl = Regex.Replace(request.Url, rewrite.In.Url, rewrite.Out.Url, RegexOptions.IgnoreCase);
-
-            if (request.Url.Equals(newUrl, StringComparison.OrdinalIgnoreCase))
+            var headers = rewrite.Out.Headers?
+                .Where(h => !string.IsNullOrEmpty(h.Name) && h.Value is not null)
+                .ToArray() ?? [];
+            if (string.IsNullOrEmpty(rewrite.Out.Url) && headers.Length == 0)
             {
-                Logger.LogRequest($"{rewrite.In?.Url}", MessageType.Skipped, new LoggingContext(e.ProxySession));
+                continue;
             }
-            else
+
+            // Match against the URL before this rule rewrites it, so that
+            // header rewrites apply to the same requests as the URL rewrite.
+            var urlMatches = Regex.IsMatch(request.Url, rewrite.In.Url, RegexOptions.IgnoreCase);
+
+            if (!string.IsNullOrEmpty(rewrite.Out.Url))
             {
-                Logger.LogRequest($"{rewrite.In?.Url} > {newUrl}", MessageType.Processed, new LoggingContext(e.ProxySession));
-                request.Url = newUrl;
+                var newUrl = Regex.Replace(request.Url, rewrite.In.Url, rewrite.Out.Url, RegexOptions.IgnoreCase);
+
+                if (request.Url.Equals(newUrl, StringComparison.OrdinalIgnoreCase))
+                {
+                    Logger.LogRequest($"{rewrite.In.Url}", MessageType.Skipped, new LoggingContext(e.ProxySession));
+                }
+                else
+                {
+                    Logger.LogRequest($"{rewrite.In.Url} > {newUrl}", MessageType.Processed, new LoggingContext(e.ProxySession));
+                    request.Url = newUrl;
+                }
+            }
+
+            if (headers.Length == 0)
+            {
+                continue;
+            }
+
+            if (!urlMatches)
+            {
+                Logger.LogRequest($"{rewrite.In.Url} (headers)", MessageType.Skipped, new LoggingContext(e.ProxySession));
+                continue;
+            }
+
+            foreach (var header in headers)
+            {
+                request.Headers.Replace(header.Name!, header.Value!);
+                Logger.LogRequest($"{rewrite.In.Url} > header {header.Name}", MessageType.Processed, new LoggingContext(e.ProxySession));
             }
         }
 

@@ -33,10 +33,32 @@
               "url": {
                 "type": "string",
                 "pattern": "^.*$",
-                "description": "URL to rewrite the request to. Can use capture groups from the 'in' pattern."
+                "description": "URL to rewrite the request to. Can use capture groups from the 'in' pattern. If omitted, the request URL isn't changed."
+              },
+              "headers": {
+                "type": "array",
+                "description": "Request headers to set on requests matching the 'in' URL. Replaces the value of an existing header (matched case-insensitively) or adds the header if it's missing.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "pattern": "^.+$",
+                      "description": "Name of the request header."
+                    },
+                    "value": {
+                      "type": "string",
+                      "description": "Literal value to set for the request header."
+                    }
+                  },
+                  "required": ["name", "value"]
+                }
               }
             },
-            "required": ["url"]
+            "anyOf": [
+              { "required": ["url"] },
+              { "required": ["headers"] }
+            ]
           }
         },
         "required": ["in", "out"]
