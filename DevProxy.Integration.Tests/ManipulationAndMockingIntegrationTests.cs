@@ -91,6 +91,35 @@ public sealed class ManipulationAndMockingIntegrationTests
     }
 
     [Fact]
+    public async Task Rewrite_RewritesUrlAndHeader_MatchingHeaderAgainstOriginalUrl()
+    {
+        await using var origin = await FakeOrigin.StartAsync();
+        var urls = KestrelProxyHarness.BuildUrlsToWatch(origin.Host);
+        var config = PluginConfig.FromJson("""
+            {
+              "rewrites": [
+                { "in": { "url": "/get$" }, "out": { "url": "/headers", "headers": [ { "name": "X-Probe", "value": "rewritten" } ] } }
+              ]
+            }
+            """);
+        var plugin = new RewritePlugin(
+            SharedHttpClient,
+            NullLogger<RewritePlugin>.Instance,
+            urls,
+            ProxyConfig,
+            config);
+
+        await using var proxy = await KestrelProxyHarness.StartAsync(origin.Host, [plugin]);
+        using var client = proxy.CreateHttpClient();
+
+        using var response = await client.GetAsync(new Uri($"http://{origin.Host}/get"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains(origin.ReceivedRequests, r => r.PathAndQuery == "/headers");
+        Assert.Equal("probe=rewritten", body);
+    }
+
+    [Fact]
     public async Task Rewrite_LeavesRequestHeader_WhenUrlDoesNotMatch()
     {
         await using var origin = await FakeOrigin.StartAsync();

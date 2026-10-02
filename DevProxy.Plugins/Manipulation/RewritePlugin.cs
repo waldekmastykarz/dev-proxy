@@ -95,7 +95,7 @@ public sealed class RewritePlugin(
             }
 
             var headers = rewrite.Out.Headers?
-                .Where(h => !string.IsNullOrEmpty(h.Name) && h.Value is not null)
+                .Where(h => h is not null && !string.IsNullOrEmpty(h.Name) && h.Value is not null)
                 .ToArray() ?? [];
             if (string.IsNullOrEmpty(rewrite.Out.Url) && headers.Length == 0)
             {
