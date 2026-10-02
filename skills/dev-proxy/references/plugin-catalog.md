@@ -117,7 +117,7 @@ Simulates token-based rate limiting for LLM APIs.
 
 ### RewritePlugin
 
-Rewrites request URLs using regex capture groups.
+Rewrites request URLs using regex capture groups and sets request header values. Each rule matches on `in.url`; `out.url` (optional) rewrites the URL, and `out.headers` (optional, `[{ "name", "value" }]`) replaces the header value or adds the header if it's missing.
 
 | Property | Default | Description |
 |----------|---------|-------------|
