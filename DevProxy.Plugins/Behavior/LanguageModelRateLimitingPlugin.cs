@@ -140,7 +140,7 @@ public sealed class LanguageModelRateLimitingPlugin(
                     ShouldThrottle,
                     _resetTime
                 ));
-                ThrottleResponse(e);
+                ThrottleResponse(e, openAiRequest?.Model);
                 state.HasBeenSet = true;
             }
             else
@@ -275,26 +275,33 @@ public sealed class LanguageModelRateLimitingPlugin(
             Configuration.HeaderRetryAfter);
     }
 
-    private void ThrottleResponse(ProxyRequestArgs e)
+    private void ThrottleResponse(ProxyRequestArgs e, string? model)
     {
         var headers = new List<MockResponseHeader>();
-        var body = string.Empty;
         var request = e.ProxySession.Request;
+        var retryAfterSeconds = (int)(_resetTime - DateTime.Now).TotalSeconds;
 
-        // Build standard OpenAI error response for token limit exceeded
+        // Report the limit that's been exhausted, matching OpenAI's
+        // tokens-per-minute rate limit error so that clients back off and retry
+        var (limit, remaining) = _promptTokensRemaining <= 0 ?
+            (Configuration.PromptTokenLimit, _promptTokensRemaining) :
+            (Configuration.CompletionTokenLimit, _completionTokensRemaining);
+        var used = limit - Math.Max(remaining, 0);
+        var modelInfo = string.IsNullOrEmpty(model) ? string.Empty : $" for {model}";
+
         var openAiError = new
         {
             error = new
             {
-                message = "You exceeded your current quota, please check your plan and billing details.",
-                type = "insufficient_quota",
+                message = string.Create(CultureInfo.InvariantCulture, $"Rate limit reached{modelInfo} on tokens per min (TPM): Limit {limit}, Used {used}. Please try again in {retryAfterSeconds}s."),
+                type = "tokens",
                 param = (object?)null,
-                code = "insufficient_quota"
+                code = "rate_limit_exceeded"
             }
         };
-        body = JsonSerializer.Serialize(openAiError, ProxyUtils.JsonSerializerOptions);
+        var body = JsonSerializer.Serialize(openAiError, ProxyUtils.JsonSerializerOptions);
 
-        headers.Add(new(Configuration.HeaderRetryAfter, ((int)(_resetTime - DateTime.Now).TotalSeconds).ToString(CultureInfo.InvariantCulture)));
+        headers.Add(new(Configuration.HeaderRetryAfter, retryAfterSeconds.ToString(CultureInfo.InvariantCulture)));
         if (request.Headers.Any(h => h.Name.Equals("Origin", StringComparison.OrdinalIgnoreCase)))
         {
             headers.Add(new("Access-Control-Allow-Origin", "*"));
