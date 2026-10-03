@@ -188,12 +188,12 @@ public sealed class BehaviorPluginsIntegrationTests
         using var client = proxy.CreateHttpClient();
 
         // /echo returns the request body, so the usage below is read back as the
-        // response's token usage. #1 drains the prompt token limit, #2 is throttled.
+        // response's token usage. #1 exceeds the prompt token limit, #2 is throttled.
         const string requestBody = """
             {
               "model": "gpt-4o",
               "messages": [ { "role": "user", "content": "hi" } ],
-              "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+              "usage": { "prompt_tokens": 15, "completion_tokens": 5, "total_tokens": 20 }
             }
             """;
         using var firstContent = new StringContent(requestBody, Encoding.UTF8, "application/json");
@@ -210,6 +210,6 @@ public sealed class BehaviorPluginsIntegrationTests
         Assert.Equal("rate_limit_exceeded", error.GetProperty("code").GetString());
         Assert.Equal("tokens", error.GetProperty("type").GetString());
         var message = error.GetProperty("message").GetString();
-        Assert.StartsWith("Rate limit reached for gpt-4o on tokens per min (TPM): Limit 10, Used 10.", message, StringComparison.Ordinal);
+        Assert.StartsWith("Rate limit reached for gpt-4o on tokens per min (TPM): Limit 10, Used 15.", message, StringComparison.Ordinal);
     }
 }

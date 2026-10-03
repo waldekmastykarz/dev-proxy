@@ -51,6 +51,8 @@ public sealed class LanguageModelRateLimitingPlugin(
     // first request and can set the initial values
     private int _promptTokensRemaining = -1;
     private int _completionTokensRemaining = -1;
+    private int _promptTokensUsed;
+    private int _completionTokensUsed;
     private DateTime _resetTime = DateTime.MinValue;
     private LanguageModelRateLimitingCustomResponseLoader? _loader;
 
@@ -118,6 +120,8 @@ public sealed class LanguageModelRateLimitingPlugin(
         {
             _promptTokensRemaining = Configuration.PromptTokenLimit;
             _completionTokensRemaining = Configuration.CompletionTokenLimit;
+            _promptTokensUsed = 0;
+            _completionTokensUsed = 0;
             _resetTime = DateTime.Now.AddSeconds(Configuration.ResetTimeWindowSeconds);
         }
 
@@ -243,6 +247,8 @@ public sealed class LanguageModelRateLimitingPlugin(
 
                         _promptTokensRemaining -= promptTokens;
                         _completionTokensRemaining -= completionTokens;
+                        _promptTokensUsed += promptTokens;
+                        _completionTokensUsed += completionTokens;
 
                         if (_promptTokensRemaining < 0)
                         {
@@ -283,10 +289,9 @@ public sealed class LanguageModelRateLimitingPlugin(
 
         // Report the limit that's been exhausted, matching OpenAI's
         // tokens-per-minute rate limit error so that clients back off and retry
-        var (limit, remaining) = _promptTokensRemaining <= 0 ?
-            (Configuration.PromptTokenLimit, _promptTokensRemaining) :
-            (Configuration.CompletionTokenLimit, _completionTokensRemaining);
-        var used = limit - Math.Max(remaining, 0);
+        var (limit, used) = _promptTokensRemaining <= 0 ?
+            (Configuration.PromptTokenLimit, _promptTokensUsed) :
+            (Configuration.CompletionTokenLimit, _completionTokensUsed);
         var modelInfo = string.IsNullOrEmpty(model) ? string.Empty : $" for {model}";
 
         var openAiError = new
