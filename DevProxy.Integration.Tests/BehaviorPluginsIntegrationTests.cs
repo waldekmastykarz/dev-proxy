@@ -79,7 +79,7 @@ public sealed class BehaviorPluginsIntegrationTests
                   "responses": [
                     {
                       "statusCode": 503,
-                      "headers": [ { "name": "Retry-After", "value": "@dynamic=7" } ]
+                      "headers": [ { "name": "RETRY-after", "value": "@dynamic=7" } ]
                     }
                   ]
                 }
@@ -92,16 +92,23 @@ public sealed class BehaviorPluginsIntegrationTests
             urls,
             ProxyConfig,
             config);
+        var retryAfter = new RetryAfterPlugin(
+            NullLogger<RetryAfterPlugin>.Instance,
+            urls);
 
         await using var proxy = await KestrelProxyHarness.StartAsync(
-            origin.Host, [plugin]);
+            origin.Host, [retryAfter, plugin]);
         using var client = proxy.CreateHttpClient();
 
         using var response = await client.GetAsync(new Uri($"http://{origin.Host}/get"));
+        // an immediate retry must be throttled by RetryAfterPlugin, proving the
+        // non-429 error registered the request for throttling
+        using var retry = await client.GetAsync(new Uri($"http://{origin.Host}/get"));
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         Assert.True(response.Headers.TryGetValues("Retry-After", out var values));
         Assert.Equal("7", Assert.Single(values));
+        Assert.Equal(HttpStatusCode.TooManyRequests, retry.StatusCode);
     }
 
     [Fact]
