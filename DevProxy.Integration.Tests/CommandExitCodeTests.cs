@@ -38,6 +38,38 @@ public sealed class CommandExitCodeTests
     }
 
     [Fact]
+    public async Task ConfigGet_DownloadFails_ReturnsNonZero()
+    {
+        using var workDir = new TempDir();
+        var configId = $"devproxy-exitcode-test-{Guid.NewGuid():N}";
+        // Route the GitHub request through an unreachable proxy so the download fails without network access.
+        var env = new Dictionary<string, string>
+        {
+            ["HTTPS_PROXY"] = "http://127.0.0.1:1",
+            ["HTTP_PROXY"] = "http://127.0.0.1:1",
+            ["NO_PROXY"] = "",
+        };
+
+        try
+        {
+            var (exitCode, output) = await RunHostAsync(workDir.Path, env, "config", "get", configId);
+
+            Assert.True(exitCode != 0, output);
+        }
+        finally
+        {
+            var configsFolder = Path.Combine(DevProxy.Abstractions.Utils.ProxyUtils.DataFolder, "configs");
+            if (Directory.Exists(configsFolder))
+            {
+                foreach (var dir in Directory.GetDirectories(configsFolder, $"{configId}*"))
+                {
+                    Directory.Delete(dir, recursive: true);
+                }
+            }
+        }
+    }
+
+    [Fact]
     public async Task MocksFromHttpResponses_Succeeds_ReturnsZero()
     {
         using var workDir = new TempDir();
@@ -73,7 +105,10 @@ public sealed class CommandExitCodeTests
         Assert.True(exitCode != 0, output);
     }
 
-    private static async Task<(int ExitCode, string Output)> RunHostAsync(string workDir, params string[] args)
+    private static Task<(int ExitCode, string Output)> RunHostAsync(string workDir, params string[] args) =>
+        RunHostAsync(workDir, new Dictionary<string, string>(), args);
+
+    private static async Task<(int ExitCode, string Output)> RunHostAsync(string workDir, Dictionary<string, string> env, params string[] args)
     {
         var hostDll = LocateHostDll();
         Assert.True(File.Exists(hostDll), $"DevProxy host not built at {hostDll}. Run `dotnet build DevProxy` first.");
@@ -91,6 +126,10 @@ public sealed class CommandExitCodeTests
         foreach (var arg in args)
         {
             psi.ArgumentList.Add(arg);
+        }
+        foreach (var (key, value) in env)
+        {
+            psi.Environment[key] = value;
         }
 
         using var process = new Process { StartInfo = psi };

@@ -137,10 +137,7 @@ sealed class ConfigCommand : Command
         {
             var configId = parseResult.GetValue(configIdArgument);
             var outputFormat = parseResult.GetValueOrDefault<OutputFormat?>(DevProxyCommand.OutputOptionName) ?? OutputFormat.Text;
-            if (configId != null)
-            {
-                await DownloadConfigAsync(configId, outputFormat);
-            }
+            return configId is null ? 1 : await DownloadConfigAsync(configId, outputFormat);
         });
 
         var configNewCommand = new Command("new", "Create new Dev Proxy configuration file");
@@ -205,7 +202,7 @@ sealed class ConfigCommand : Command
         ]);
     }
 
-    private async Task DownloadConfigAsync(string configId, OutputFormat outputFormat)
+    private async Task<int> DownloadConfigAsync(string configId, OutputFormat outputFormat)
     {
         try
         {
@@ -237,7 +234,7 @@ sealed class ConfigCommand : Command
                 {
                     _logger.LogError("Config {ConfigId} not found in the samples repo", configId);
                 }
-                return;
+                return 1;
             }
             foreach (var sampleFile in sampleFiles)
             {
@@ -256,14 +253,14 @@ sealed class ConfigCommand : Command
                     mockFiles = configInfo.MockFiles
                 }, ProxyUtils.JsonSerializerOptions);
                 _logger.LogStructuredOutput(json);
-                return;
+                return 0;
             }
 
             _logger.LogInformation("Config saved in {TargetFolderPath}\r\n", targetFolderPath);
 
             if (!configInfo.ConfigFiles.Any() && !configInfo.MockFiles.Any())
             {
-                return;
+                return 0;
             }
 
             if (configInfo.ConfigFiles.Any())
@@ -288,6 +285,8 @@ sealed class ConfigCommand : Command
                     }
                 }
             }
+
+            return 0;
         }
         catch (Exception ex)
         {
@@ -295,6 +294,7 @@ sealed class ConfigCommand : Command
             {
                 _logger.LogError(ex, "Error downloading config");
             }
+            return 1;
         }
     }
 
