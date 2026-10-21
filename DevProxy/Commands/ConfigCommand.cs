@@ -160,7 +160,7 @@ sealed class ConfigCommand : Command
             var format = parseResult.GetValue(formatOption);
             var name = parseResult.GetValue(nameArgument) ?? GetDefaultConfigFileName(format);
             var outputFormat = parseResult.GetValueOrDefault<OutputFormat?>(DevProxyCommand.OutputOptionName) ?? OutputFormat.Text;
-            await CreateConfigFileAsync(name, format, outputFormat);
+            return await CreateConfigFileAsync(name, format, outputFormat);
         });
 
         var configOpenCommand = new Command("open", "Open devproxyrc.json");
@@ -441,7 +441,7 @@ sealed class ConfigCommand : Command
         }
     }
 
-    private async Task CreateConfigFileAsync(string name, ConfigFileFormat? format, OutputFormat outputFormat)
+    private async Task<int> CreateConfigFileAsync(string name, ConfigFileFormat? format, OutputFormat outputFormat)
     {
         try
         {
@@ -466,6 +466,7 @@ sealed class ConfigCommand : Command
             {
                 _logger.LogInformation("Config file created at {TargetFileName}", targetFileName);
             }
+            return 0;
         }
         catch (Exception ex)
         {
@@ -473,6 +474,7 @@ sealed class ConfigCommand : Command
             {
                 _logger.LogError(ex, "Error creating config");
             }
+            return 1;
         }
     }
 
