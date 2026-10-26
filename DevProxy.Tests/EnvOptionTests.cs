@@ -35,7 +35,7 @@ public class EnvOptionTests
     }
 
     [Fact]
-    public void SetEnvironmentVariables_SetsConfigAndCommandLineValues_CommandLineWins()
+    public void Apply_SetsConfigAndCommandLineValues_CommandLineWins()
     {
         var prefix = $"DEVPROXY_TEST_{Guid.NewGuid():N}_";
         var fromConfig = prefix + "CONFIG";
@@ -52,7 +52,8 @@ public class EnvOptionTests
 
         try
         {
-            ProxyConfiguration.SetEnvironmentVariables(configuration, new Dictionary<string, string>
+            using var environment = new ProcessEnvironment();
+            environment.Apply(configuration, new Dictionary<string, string>
             {
                 [overridden] = "cli",
                 [fromCli] = "cli",
@@ -68,5 +69,69 @@ public class EnvOptionTests
             Environment.SetEnvironmentVariable(overridden, null);
             Environment.SetEnvironmentVariable(fromCli, null);
         }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("inherited")]
+    public void Dispose_BeforeReload_RestoresRemovedOverridesAndPreservesCommandLineValues(string? inherited)
+    {
+        var prefix = $"DEVPROXY_TEST_{Guid.NewGuid():N}_";
+        var removed = prefix + "REMOVED";
+        var overridden = prefix + "OVERRIDDEN";
+        var cli = new Dictionary<string, string> { [overridden] = "cli" };
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [$"env:{removed}"] = "config",
+                [$"env:{overridden}"] = "config",
+            })
+            .Build();
+
+        Environment.SetEnvironmentVariable(removed, inherited);
+        try
+        {
+            using (var environment = new ProcessEnvironment())
+            {
+                environment.Apply(configuration, cli);
+                Assert.Equal("config", Environment.GetEnvironmentVariable(removed));
+                Assert.Equal("cli", Environment.GetEnvironmentVariable(overridden));
+            }
+
+            var reloadedConfiguration = new ConfigurationBuilder().Build();
+            using (var environment = new ProcessEnvironment())
+            {
+                environment.Apply(reloadedConfiguration, cli);
+                Assert.Equal(inherited, Environment.GetEnvironmentVariable(removed));
+                Assert.Equal("cli", Environment.GetEnvironmentVariable(overridden));
+            }
+
+            Assert.Equal(inherited, Environment.GetEnvironmentVariable(removed));
+            Assert.Null(Environment.GetEnvironmentVariable(overridden));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(removed, null);
+            Environment.SetEnvironmentVariable(overridden, null);
+        }
+    }
+
+    [Fact]
+    public void Dispose_WhenApplyingOverridesFails_RestoresEarlierOverrides()
+    {
+        var name = $"DEVPROXY_TEST_{Guid.NewGuid():N}";
+        var configuration = new ConfigurationBuilder().Build();
+
+        Assert.Throws<ArgumentException>(() =>
+        {
+            using var environment = new ProcessEnvironment();
+            environment.Apply(configuration, new Dictionary<string, string>
+            {
+                [name] = "config",
+                ["invalid=name"] = "invalid",
+            });
+        });
+
+        Assert.Null(Environment.GetEnvironmentVariable(name));
     }
 }

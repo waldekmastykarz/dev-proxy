@@ -799,7 +799,8 @@ sealed class DevProxyCommand : RootCommand
             StartedAt = DateTimeOffset.UtcNow,
             ConfigFile = _proxyConfiguration.ConfigFile,
             Port = _proxyConfiguration.Port,
-            AsSystemProxy = _proxyConfiguration.AsSystemProxy
+            AsSystemProxy = _proxyConfiguration.AsSystemProxy,
+            SuppressTokenOutput = !ApiSecurity.ShouldDisplayToken
         };
 
         await StateManager.SaveStateAsync(state);

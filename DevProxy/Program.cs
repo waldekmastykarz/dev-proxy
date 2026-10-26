@@ -187,7 +187,7 @@ static async Task<int> StartDetachedProcessAsync(string[] args)
             if (state is { Port: > 0 } && !string.IsNullOrEmpty(state.ApiUrl) && !state.ApiUrl.EndsWith(":0", StringComparison.Ordinal))
             {
                 var proxyUrl = state.ProxyUrl;
-                var token = ApiSecurity.ShouldDisplayToken ?
+                var token = ApiSecurity.ShouldDisplayTokenFor(state) ?
                     (await File.ReadAllTextAsync(ApiSecurity.GetTokenFilePath(state.Pid))).Trim() : null;
 
                 if (isJsonOutput)
@@ -356,7 +356,7 @@ static string EscapeArgument(string arg)
     return arg;
 }
 
-static WebApplication BuildApplication(DevProxyConfigOptions options)
+static WebApplication BuildApplication(DevProxyConfigOptions options, ProcessEnvironment environment)
 {
     // Don't pass command-line args to WebApplication.CreateBuilder because:
     // 1. Dev Proxy uses System.CommandLine for CLI parsing, not ASP.NET Core's CommandLineConfigurationProvider
@@ -364,7 +364,7 @@ static WebApplication BuildApplication(DevProxyConfigOptions options)
     var builder = WebApplication.CreateBuilder();
 
     _ = builder.Configuration.ConfigureDevProxyConfig(options);
-    ProxyConfiguration.SetEnvironmentVariables(builder.Configuration, options.Env);
+    environment.Apply(builder.Configuration, options.Env);
     _ = builder.Logging.ConfigureDevProxyLogging(builder.Configuration, options);
     var allowedOrigins = ApiSecurity.GetAllowedOrigins(builder.Configuration);
     _ = builder.Services.ConfigureDevProxyServices(builder.Configuration, options, allowedOrigins);
@@ -394,7 +394,9 @@ static WebApplication BuildApplication(DevProxyConfigOptions options)
 
 static async Task<int> RunProxyAsync(string[] args, DevProxyConfigOptions options)
 {
-    var app = BuildApplication(options);
+    // Keep overrides through host shutdown, but restore inherited values before a hot reload.
+    using var environment = new ProcessEnvironment();
+    var app = BuildApplication(options, environment);
     try
     {
         var devProxyCommand = app.Services.GetRequiredService<DevProxyCommand>();
