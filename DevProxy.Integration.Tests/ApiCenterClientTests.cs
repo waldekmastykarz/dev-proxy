@@ -8,9 +8,30 @@ using Xunit;
 
 namespace DevProxy.Integration.Tests;
 
-public class ApiCenterClientTests
+public sealed class ApiCenterClientTests
 {
     private const string VariableName = "DEVPROXY_TEST_APICENTER_SUBSCRIPTION_ID";
+
+    [Theory]
+    [InlineData("subscriptionId")]
+    [InlineData("resourceGroupName")]
+    [InlineData("serviceName")]
+    [InlineData("workspaceName")]
+    public void Constructor_MissingSetting_ErrorUsesConfigKeyName(string missingKey)
+    {
+        var configuration = new ApiCenterClientConfiguration
+        {
+            SubscriptionId = missingKey == "subscriptionId" ? "" : "sub",
+            ResourceGroupName = missingKey == "resourceGroupName" ? "" : "rg",
+            ServiceName = missingKey == "serviceName" ? "" : "svc",
+            WorkspaceName = missingKey == "workspaceName" ? "" : "default"
+        };
+
+        var ex = Assert.Throws<ArgumentException>(() =>
+            new ApiCenterClient(configuration, NullLogger<ApiCenterClient>.Instance));
+
+        Assert.Equal($"Specify {missingKey} in the configuration.", ex.Message);
+    }
 
     [Fact]
     public void Constructor_UnsetEnvironmentVariable_Throws()
