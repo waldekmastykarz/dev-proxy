@@ -680,6 +680,15 @@ sealed class DevProxyCommand : RootCommand
         }
     }
 
+    internal static void ApplyDiscoverOption(IProxyConfiguration proxyConfiguration, bool? isDiscover)
+    {
+        // Discovery mode requires recording, but --discover false must not enable it
+        if (isDiscover == true)
+        {
+            proxyConfiguration.Record = true;
+        }
+    }
+
     private void ConfigureFromOptions(ParseResult parseResult)
     {
         var port = parseResult.GetValueOrDefault<int?>(PortOptionName);
@@ -748,11 +757,7 @@ sealed class DevProxyCommand : RootCommand
         {
             _proxyConfiguration.TimeoutSeconds = timeout.Value;
         }
-        var isDiscover = parseResult.GetValueOrDefault<bool?>(DiscoverOptionName);
-        if (isDiscover is not null)
-        {
-            _proxyConfiguration.Record = true;
-        }
+        ApplyDiscoverOption(_proxyConfiguration, parseResult.GetValueOrDefault<bool?>(DiscoverOptionName));
         var env = parseResult.GetValueOrDefault<string[]?>(EnvOptionName);
         if (env is not null)
         {
