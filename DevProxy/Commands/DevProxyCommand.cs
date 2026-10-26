@@ -63,7 +63,6 @@ sealed class DevProxyCommand : RootCommand
     private static bool _isInternalDaemonResolved;
     private static bool _stdioLogFilePathResolved;
     private static bool _detachedLogFilePathResolved;
-    private static bool _noColorResolved;
 
     public static bool HasGlobalOptions
     {
@@ -222,23 +221,10 @@ sealed class DevProxyCommand : RootCommand
         }
     }
 
-    public static bool NoColor
-    {
-        get
-        {
-            if (_noColorResolved)
-            {
-                return field;
-            }
-
-            field = ShouldDisableColor(
-                Environment.GetCommandLineArgs(),
-                Environment.GetEnvironmentVariable("NO_COLOR"),
-                Environment.GetEnvironmentVariable("TERM"));
-            _noColorResolved = true;
-            return field;
-        }
-    }
+    public static bool NoColor => ShouldDisableColor(
+        Environment.GetCommandLineArgs(),
+        Environment.GetEnvironmentVariable("NO_COLOR"),
+        Environment.GetEnvironmentVariable("TERM"));
 
     // Per https://no-color.org, NO_COLOR disables color only when present and not empty.
     internal static bool ShouldDisableColor(string[] args, string? noColorEnv, string? termEnv) =>
