@@ -65,7 +65,7 @@ sealed class JwtCommand : Command
                 var claims = new Dictionary<string, string>();
                 foreach (var token in result.Tokens)
                 {
-                    var claim = token.Value.Split(":");
+                    var claim = token.Value.Split(':', 2);
 
                     if (claim.Length != 2)
                     {
