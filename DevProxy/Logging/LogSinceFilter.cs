@@ -278,7 +278,7 @@ internal sealed partial class LogSinceFilter(DateTimeOffset logStartTime, DateTi
     [GeneratedRegex(@"^\s*" + Ansi + @"\s*req\s*" + Ansi + @"\s*\u256d")]
     private static partial Regex RequestStartRegex();
 
-    [GeneratedRegex(@"^\s*" + Ansi + @"\s*\S+\s*" + Ansi + @"\s*\u2570")]
+    [GeneratedRegex(@"^\s*" + Ansi + @"\s*\S*\s*" + Ansi + @"\s*\u2570")]
     private static partial Regex RequestEndRegex();
 
     [GeneratedRegex(@"^\s*" + Ansi + @"\s*time\s*" + Ansi + @"\s*[\u2502\u2570]\s*(?<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s*$")]

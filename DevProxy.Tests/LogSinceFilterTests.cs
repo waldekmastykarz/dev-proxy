@@ -2,7 +2,12 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using DevProxy.Abstractions.Proxy;
 using DevProxy.Logging;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using System.Globalization;
 
 using Xunit;
 
@@ -23,6 +28,72 @@ public class LogSinceFilterTests
         " skip  \u2502 RetryAfterPlugin: Request not throttled",
         " pass  \u2570 Passed through",
     ];
+
+    private static string[] RequestBlockWithNormalTerminator(DateTimeOffset timestamp)
+    {
+        var formatter = new ProxyConsoleFormatter(Options.Create(new ProxyConsoleFormatterOptions { IncludeScopes = true }));
+        var scopeProvider = new LoggerExternalScopeProvider();
+        using var scope = scopeProvider.Push(new Dictionary<string, object> { ["requestId"] = 1 });
+        using var writer = new StringWriter(CultureInfo.InvariantCulture);
+
+        Write("GET https://example.com", MessageType.InterceptedRequest);
+        Write(timestamp.ToString("O", CultureInfo.InvariantCulture), MessageType.Timestamp);
+        Write("done", MessageType.Normal, "Plugin");
+        Write(string.Empty, MessageType.FinishedProcessingRequest);
+
+        return writer.ToString().Replace("\r", string.Empty, StringComparison.Ordinal).Split('\n')[..^1];
+
+        void Write(string message, MessageType type, string category = ProxyConsoleFormatter.DefaultCategoryName)
+        {
+            var log = new RequestLog(message, type, context: null);
+            var entry = new LogEntry<RequestLog>(LogLevel.Information, category, new EventId(0), log, null, (state, _) => state.Message);
+            formatter.Write(entry, scopeProvider, writer);
+        }
+    }
+
+    [Fact]
+    public void Filter_NormalMessageTerminator_DoesNotMisdateFollowingMessages()
+    {
+        var request = RequestBlockWithNormalTerminator(_start.AddMinutes(5));
+        var laterTime = new DateTimeOffset(_start.AddHours(2));
+        var laterMessage = $" info    [{laterTime:O}] Later message";
+        string[] lines = [.. request, laterMessage, "Continuation of later message"];
+
+        Assert.Equal("       \u2570 Plugin: done", request[^1]);
+        Assert.Equal([laterMessage, "Continuation of later message"],
+            LogSinceFilter.Filter(lines, _start, _start.AddHours(1)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReadLinesAsync_NormalMessageTerminator_EmitsCompletedBlockImmediately(bool ansi)
+    {
+        var request = RequestBlockWithNormalTerminator(_start.AddMinutes(5));
+        if (ansi)
+        {
+            request[^1] = "\u001b[39;49m      \u001b[0m \u2570 Plugin: done";
+        }
+
+        var path = Path.GetTempFileName();
+        try
+        {
+            using var reader = new LogFileReader(path, _start, _start.AddMinutes(1));
+            await File.WriteAllTextAsync(path, string.Join('\n', request[..^1]) + "\n");
+            Assert.Empty(await reader.ReadLinesAsync(CancellationToken.None));
+
+            await File.AppendAllTextAsync(path, request[^1] + "\n");
+            Assert.Equal(request, await reader.ReadLinesAsync(CancellationToken.None));
+
+            var later = $" info    [{new DateTimeOffset(_start.AddHours(2)):O}] Independent message";
+            await File.AppendAllTextAsync(path, later + "\n");
+            Assert.Equal([later], await reader.ReadLinesAsync(CancellationToken.None));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
 
     [Fact]
     public void Filter_RequestsOnPreviousDays_ExcludedBySinceDuration()
