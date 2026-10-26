@@ -479,7 +479,8 @@ public class MockResponsePlugin(
             Logger.LogInformation("Processing file: {File}", Path.GetRelativePath(".", file));
             try
             {
-                mockResponses.Add(MockResponse.FromHttpResponse(await File.ReadAllTextAsync(file), Logger));
+                mockResponses.Add(MockResponse.FromHttpResponse(await File.ReadAllTextAsync(file), Logger, out var hasParseErrors));
+                hasErrors |= hasParseErrors;
             }
             catch (Exception ex)
             {

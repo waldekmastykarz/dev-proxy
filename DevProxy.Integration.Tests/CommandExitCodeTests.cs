@@ -3,6 +3,7 @@
 // See the LICENSE file in the project root for more information.
 
 using System.Diagnostics;
+using System.Text.Json;
 using Xunit;
 
 namespace DevProxy.Integration.Tests;
@@ -103,6 +104,29 @@ public sealed class CommandExitCodeTests
         var (exitCode, output) = await RunHostAsync(workDir.Path, "mocks", "from-http-responses", "*.http", "--mocks-file", "mocks.json");
 
         Assert.True(exitCode != 0, output);
+    }
+
+    [Theory]
+    [InlineData("HTTP/1.1 200 OK\nInvalidHeader\n\nhello", "hello")]
+    [InlineData("HTTP/1.1 200 OK\nContent-Type: application/json\n\n{invalid}", "{invalid}")]
+    public async Task MocksFromHttpResponses_LoggedParseError_ReturnsNonZeroAndPreservesMocks(string response, string body)
+    {
+        using var workDir = new TempDir();
+        await File.WriteAllTextAsync(Path.Combine(workDir.Path, "devproxyrc.json"), ConfigFile);
+        await File.WriteAllTextAsync(Path.Combine(workDir.Path, "invalid.http"), response);
+        await File.WriteAllTextAsync(Path.Combine(workDir.Path, "valid.http"), "HTTP/1.1 201 Created\n\nvalid");
+
+        var (exitCode, output) = await RunHostAsync(workDir.Path, "mocks", "from-http-responses", "*.http", "--mocks-file", "mocks.json");
+
+        Assert.True(exitCode != 0, output);
+        using var mocks = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(workDir.Path, "mocks.json")));
+        var responses = mocks.RootElement.GetProperty("mocks").EnumerateArray()
+            .Select(mock => mock.GetProperty("response")).ToArray();
+        Assert.Equal(2, responses.Length);
+        Assert.Contains(responses, response => response.GetProperty("statusCode").GetInt32() == 200 &&
+            response.GetProperty("body").GetString() == body);
+        Assert.Contains(responses, response => response.GetProperty("statusCode").GetInt32() == 201 &&
+            response.GetProperty("body").GetString() == "valid");
     }
 
     private static Task<(int ExitCode, string Output)> RunHostAsync(string workDir, params string[] args) =>
