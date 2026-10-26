@@ -368,6 +368,7 @@ static WebApplication BuildApplication(DevProxyConfigOptions options, ProcessEnv
 
     _ = builder.Configuration.ConfigureDevProxyConfig(options);
     environment.Apply(builder.Configuration, options.Env);
+    _ = Announcement.ShowOnceAsync();
     _ = builder.Logging.ConfigureDevProxyLogging(builder.Configuration, options);
     var allowedOrigins = ApiSecurity.GetAllowedOrigins(builder.Configuration);
     _ = builder.Services.ConfigureDevProxyServices(builder.Configuration, options, allowedOrigins);
@@ -411,12 +412,11 @@ static async Task<int> RunProxyAsync(string[] args, DevProxyConfigOptions option
     }
 }
 
-_ = Announcement.ShowAsync();
-
 // Handle 'config validate' early to allow validation of broken configs
 // without requiring the full DI container to be built
 if (DevProxyCommand.IsConfigValidateCommand)
 {
+    _ = Announcement.ShowOnceAsync();
     var validateExitCode = await ConfigCommand.RunValidateStandaloneAsync(args);
     Environment.Exit(validateExitCode);
     return;

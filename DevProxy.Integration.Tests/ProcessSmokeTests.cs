@@ -3,7 +3,9 @@
 // See the LICENSE file in the project root for more information.
 
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Xunit;
@@ -28,6 +30,145 @@ namespace DevProxy.Integration.Tests;
 public sealed class ProcessSmokeTests
 {
     private static readonly TimeSpan s_startupTimeout = TimeSpan.FromSeconds(90);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Startup_EnvironmentOverrides_PreserveTildeConfigPathAndApplyBeforeAnnouncement(bool useCommandLine)
+    {
+        var host = Path.Combine(Path.GetDirectoryName(LocateHostDll())!,
+            OperatingSystem.IsWindows() ? "devproxy.exe" : "devproxy");
+        Assert.True(File.Exists(host), "Build DevProxy before running process smoke tests.");
+
+        var workDir = Directory.CreateTempSubdirectory("devproxy-startup-env-");
+        var managementDir = workDir.CreateSubdirectory("management");
+        var overrideHome = workDir.CreateSubdirectory("override-home");
+        using var inheritedProxy = new TcpListener(IPAddress.Loopback, 0);
+        using var effectiveProxy = new TcpListener(IPAddress.Loopback, 0);
+        inheritedProxy.Start();
+        effectiveProxy.Start();
+        var inheritedProxyUrl = $"http://127.0.0.1:{((IPEndPoint)inheritedProxy.LocalEndpoint).Port}";
+        var effectiveProxyUrl = $"http://127.0.0.1:{((IPEndPoint)effectiveProxy.LocalEndpoint).Port}";
+        var inheritedEnvironment = new Dictionary<string, string>
+        {
+            ["HTTP_PROXY"] = inheritedProxyUrl,
+            ["HTTPS_PROXY"] = inheritedProxyUrl,
+            ["ALL_PROXY"] = inheritedProxyUrl,
+            ["NO_PROXY"] = "",
+            ["http_proxy"] = inheritedProxyUrl,
+            ["https_proxy"] = inheritedProxyUrl,
+            ["all_proxy"] = inheritedProxyUrl,
+            ["no_proxy"] = "",
+        };
+        var overrides = new Dictionary<string, string>
+        {
+            ["HOME"] = overrideHome.FullName,
+            ["http_proxy"] = effectiveProxyUrl,
+            ["https_proxy"] = effectiveProxyUrl,
+            ["all_proxy"] = effectiveProxyUrl,
+            ["no_proxy"] = "",
+        };
+        int? pid = null;
+        string? logFile = null;
+        using var proxyTimeout = new CancellationTokenSource(s_startupTimeout);
+        var requests = new ConcurrentQueue<string>();
+        var inheritedRequests = new ConcurrentQueue<string>();
+        var proxyRequests = RejectProxyRequestsAsync(effectiveProxy, requests, proxyTimeout.Token);
+        var inheritedProxyRequests = RejectProxyRequestsAsync(inheritedProxy, inheritedRequests, proxyTimeout.Token);
+        try
+        {
+            var config = JsonNode.Parse(ConfigFile)!.AsObject();
+            config.Remove("$schema");
+            config["installCert"] = false;
+            config["noFirstRun"] = true;
+            config["validateSchemas"] = false;
+            config["mocksPlugin"]!["mocksFile"] = Path.Combine(workDir.FullName, "mocks.json");
+            var mocks = JsonNode.Parse(MocksFile)!.AsObject();
+            mocks.Remove("$schema");
+            await File.WriteAllTextAsync(Path.Combine(workDir.FullName, "mocks.json"), mocks.ToJsonString());
+            await File.WriteAllTextAsync(Path.Combine(managementDir.FullName, "devproxyrc.json"), config.ToJsonString());
+            if (!useCommandLine)
+            {
+                config["env"] = JsonSerializer.SerializeToNode(overrides);
+            }
+            var configPath = Path.Combine(workDir.FullName, "devproxyrc.json");
+            await File.WriteAllTextAsync(configPath, config.ToJsonString());
+            var tildePath = "~/" + Path.GetRelativePath(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), configPath);
+            var args = new List<string>
+            {
+                "--detach", "--as-system-proxy", "false", "--port", "0", "--api-port", "0",
+                "--install-cert", "false", "--no-first-run", "--output", "json", "-c", tildePath,
+            };
+            if (useCommandLine)
+            {
+                args.Add("--env");
+                args.AddRange(overrides.Select(variable => $"{variable.Key}={variable.Value}"));
+            }
+
+            var startup = await RunCommandAsync(host, workDir.FullName, args, inheritedEnvironment);
+            Assert.Equal(0, startup.ExitCode);
+            var started = GetResultData(startup.Output);
+            pid = started.GetProperty("pid").GetInt32();
+            logFile = started.GetProperty("logFile").GetString();
+
+            Assert.Contains("CONNECT aka.ms:443 HTTP/1.1", requests);
+            Assert.Empty(inheritedRequests);
+
+            var status = await RunCommandAsync(host, managementDir.FullName,
+                ["status", "--pid", pid.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), "--output", "json"]);
+            Assert.Equal(0, status.ExitCode);
+            var statusData = GetResultData(status.Output);
+            Assert.Equal(configPath, statusData.GetProperty("configFile").GetString());
+            Assert.Equal("available", statusData.GetProperty("apiStatus").GetString());
+        }
+        finally
+        {
+            try
+            {
+                if (pid.HasValue)
+                {
+                    var stopped = await RunCommandAsync(host, managementDir.FullName,
+                        ["stop", "--pid", pid.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)]);
+                    Assert.Equal(0, stopped.ExitCode);
+                }
+            }
+            finally
+            {
+                await proxyTimeout.CancelAsync();
+                try
+                {
+                    await Task.WhenAll(proxyRequests, inheritedProxyRequests);
+                }
+                catch (OperationCanceledException) when (proxyTimeout.IsCancellationRequested)
+                {
+                }
+                if (logFile is not null)
+                {
+                    File.Delete(logFile);
+                }
+                workDir.Delete(recursive: true);
+            }
+        }
+    }
+
+    private static async Task RejectProxyRequestsAsync(
+        TcpListener listener, ConcurrentQueue<string> requests, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            using var connection = await listener.AcceptTcpClientAsync(cancellationToken);
+            using var reader = new StreamReader(connection.GetStream(), leaveOpen: true);
+            var request = await reader.ReadLineAsync(cancellationToken);
+            if (request is not null)
+            {
+                requests.Enqueue(request);
+            }
+            await connection.GetStream().WriteAsync(
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(),
+                cancellationToken);
+        }
+    }
 
     [Theory]
     [InlineData("text", "cli")]
@@ -135,7 +276,8 @@ public sealed class ProcessSmokeTests
         throw new InvalidOperationException("Command did not emit a JSON result.");
     }
 
-    private static async Task<(int ExitCode, string Output)> RunCommandAsync(string host, string workDir, IEnumerable<string> args)
+    private static async Task<(int ExitCode, string Output)> RunCommandAsync(
+        string host, string workDir, IEnumerable<string> args, IReadOnlyDictionary<string, string>? environment = null)
     {
         var startInfo = new ProcessStartInfo(host)
         {
@@ -145,6 +287,13 @@ public sealed class ProcessSmokeTests
             RedirectStandardError = true,
         };
         startInfo.Environment.Remove("CI");
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+            {
+                startInfo.Environment[name] = value;
+            }
+        }
         foreach (var arg in args)
         {
             startInfo.ArgumentList.Add(arg);

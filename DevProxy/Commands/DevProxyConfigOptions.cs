@@ -7,16 +7,7 @@ namespace DevProxy.Commands;
 
 sealed class DevProxyConfigOptions : RootCommand
 {
-    public string? ConfigFile
-    {
-        get
-        {
-            var configFile = _parseResult?.GetValueOrDefault<string?>(DevProxyCommand.ConfigFileOptionName);
-            return configFile is not null ?
-                Path.GetFullPath(ProxyUtils.ReplacePathTokens(configFile)) :
-                null;
-        }
-    }
+    public string? ConfigFile { get; private set; }
 
     public int? ApiPort => _parseResult?.GetValueOrDefault<int?>(DevProxyCommand.ApiPortOptionName);
     public string? ApiIpAddress => _parseResult?.GetValueOrDefault<string?>(DevProxyCommand.ApiIpAddressOptionName);
@@ -244,5 +235,7 @@ sealed class DevProxyConfigOptions : RootCommand
     public void ParseOptions(string[] args)
     {
         _parseResult = Parse(args);
+        var configFile = _parseResult.GetValueOrDefault<string?>(DevProxyCommand.ConfigFileOptionName);
+        ConfigFile = configFile is not null ? Path.GetFullPath(configFile) : null;
     }
 }

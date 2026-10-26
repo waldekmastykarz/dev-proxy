@@ -3,6 +3,7 @@
 // See the LICENSE file in the project root for more information.
 
 using DevProxy.Proxy;
+using DevProxy.Commands;
 using DevProxy.State;
 using Microsoft.Extensions.Configuration;
 using Xunit;
@@ -15,6 +16,35 @@ public class ManagementEnvironmentDefinition;
 [Collection("management-environment")]
 public class StateManagerEnvironmentTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ConfigFile_AfterHomeOverride_RetainsInitiallyResolvedPath(bool stdio)
+    {
+        var options = new DevProxyConfigOptions();
+        options.ParseOptions(stdio
+            ? ["stdio", "-c", "~/.devproxy/devproxyrc.json", "node", "app.js"]
+            : ["-c", "~/.devproxy/devproxyrc.json"]);
+        var inheritedPath = options.ConfigFile;
+        Assert.NotNull(inheritedPath);
+        Assert.True(Path.IsPathFullyQualified(inheritedPath));
+
+        var home = Directory.CreateTempSubdirectory("devproxy-config-home-");
+        try
+        {
+            using var environment = new ProcessEnvironment();
+            environment.Apply(new ConfigurationBuilder().Build(), new Dictionary<string, string>
+            {
+                ["HOME"] = home.FullName,
+            });
+            Assert.Equal(inheritedPath, options.ConfigFile);
+        }
+        finally
+        {
+            home.Delete();
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

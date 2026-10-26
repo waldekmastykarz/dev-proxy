@@ -72,6 +72,7 @@ static class IServiceCollectionExtensions
         DevProxyConfigOptions options)
     {
         _ = services
+            .AddSingleton(options)
             .AddSingleton((IConfigurationRoot)configuration)
             .AddSingleton<IProxyConfiguration, ProxyConfiguration>()
             .AddSingleton<IProxyStateController, ProxyStateController>()

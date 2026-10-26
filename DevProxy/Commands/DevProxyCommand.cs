@@ -252,6 +252,7 @@ sealed class DevProxyCommand : RootCommand
         IProxyConfiguration proxyConfiguration,
         IServiceProvider serviceProvider,
         UpdateNotification updateNotification,
+        DevProxyConfigOptions options,
         ILogger<DevProxyCommand> logger) : base($"Start Dev Proxy\n\nAPI:\n  Dev Proxy exposes an authenticated REST API for runtime management.\n  Use --api-port (default: {proxyConfiguration.ApiPort}) and --api-ip-address (default: 127.0.0.1).\n  The API bind address is independent of --ip-address.\n  Run 'devproxy status' for the API URL and token, or 'devproxy api show' for endpoints.")
     {
         _serviceProvider = serviceProvider;
@@ -261,7 +262,7 @@ sealed class DevProxyCommand : RootCommand
         _updateNotification = updateNotification;
         _logger = logger;
 
-        ConfigureCommand();
+        ConfigureCommand(options);
     }
 
     public async Task<int> InvokeAsync(string[] args, WebApplication app)
@@ -368,12 +369,12 @@ sealed class DevProxyCommand : RootCommand
         }
     }
 
-    private void ConfigureCommand()
+    private void ConfigureCommand(DevProxyConfigOptions configOptions)
     {
         ConfigFileOption.Validators.Clear();
         ConfigFileOption.Validators.Add(input =>
         {
-            var filePath = ProxyUtils.ReplacePathTokens(input.Tokens[0].Value);
+            var filePath = configOptions.ConfigFile ?? ProxyUtils.ReplacePathTokens(input.Tokens[0].Value);
             if (string.IsNullOrEmpty(filePath))
             {
                 return;
