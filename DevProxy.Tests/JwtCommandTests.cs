@@ -40,9 +40,12 @@ public class JwtCommandTests
         var command = new JwtCommand();
         var options = command.GetJwtOptions(command.Parse("create"));
 
+        var before = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var token = new JwtSecurityTokenHandler().ReadJwtToken(JwtTokenGenerator.CreateToken(options));
+        var after = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         Assert.Equal(["https://myserver.com"], token.Audiences);
-        Assert.Equal(TimeSpan.FromMinutes(60), token.ValidTo - token.ValidFrom);
+        Assert.InRange(new DateTimeOffset(token.ValidFrom).ToUnixTimeSeconds(), before, after);
+        Assert.InRange(new DateTimeOffset(token.ValidTo).ToUnixTimeSeconds(), before + 3600, after + 3600);
     }
 }
