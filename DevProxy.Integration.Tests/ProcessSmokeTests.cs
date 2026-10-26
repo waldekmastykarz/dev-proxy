@@ -121,6 +121,47 @@ public sealed class ProcessSmokeTests
             var statusData = GetResultData(status.Output);
             Assert.Equal(configPath, statusData.GetProperty("configFile").GetString());
             Assert.Equal("available", statusData.GetProperty("apiStatus").GetString());
+
+            if (!useCommandLine)
+            {
+                Assert.NotNull(logFile);
+                Assert.DoesNotContain("HTTP proxy settings are cached", await File.ReadAllTextAsync(logFile), StringComparison.Ordinal);
+                config["env"]!.AsObject().Remove("https_proxy");
+                config["env"]!["no_proxy"] = "api.contoso.local";
+                await Task.Delay(600);
+                await File.WriteAllTextAsync(configPath, config.ToJsonString());
+
+                using var reloadTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                string logs;
+                do
+                {
+                    await Task.Delay(100, reloadTimeout.Token);
+                    logs = await File.ReadAllTextAsync(logFile, reloadTimeout.Token);
+                } while (!logs.Contains("HTTP proxy settings are cached", StringComparison.Ordinal));
+
+                var warning = logs.Split('\n').Single(line => line.Contains("HTTP proxy settings are cached", StringComparison.Ordinal));
+                Assert.Contains(OperatingSystem.IsWindows() ? "HTTPS_PROXY" : "https_proxy", warning, StringComparison.Ordinal);
+                Assert.Contains(OperatingSystem.IsWindows() ? "NO_PROXY" : "no_proxy", warning, StringComparison.Ordinal);
+                Assert.Contains("Stop Dev Proxy and start it again", warning, StringComparison.Ordinal);
+                Assert.DoesNotContain(inheritedProxyUrl, warning, StringComparison.Ordinal);
+                Assert.DoesNotContain(effectiveProxyUrl, warning, StringComparison.Ordinal);
+
+                while (true)
+                {
+                    await Task.Delay(100, reloadTimeout.Token);
+                    var reloadedStatus = await RunCommandAsync(host, managementDir.FullName,
+                        ["status", "--pid", pid.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), "--output", "json"]);
+                    if (reloadedStatus.ExitCode == 0)
+                    {
+                        var data = GetResultData(reloadedStatus.Output);
+                        if (data.GetProperty("apiStatus").GetString() == "available" &&
+                            data.GetProperty("startedAt").GetString() != statusData.GetProperty("startedAt").GetString())
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
         }
         finally
         {

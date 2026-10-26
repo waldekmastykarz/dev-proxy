@@ -359,7 +359,8 @@ static string EscapeArgument(string arg)
     return arg;
 }
 
-static WebApplication BuildApplication(DevProxyConfigOptions options, ProcessEnvironment environment)
+static WebApplication BuildApplication(
+    DevProxyConfigOptions options, ProcessEnvironment environment, HttpProxyEnvironment proxyEnvironment)
 {
     // Don't pass command-line args to WebApplication.CreateBuilder because:
     // 1. Dev Proxy uses System.CommandLine for CLI parsing, not ASP.NET Core's CommandLineConfigurationProvider
@@ -368,6 +369,7 @@ static WebApplication BuildApplication(DevProxyConfigOptions options, ProcessEnv
 
     _ = builder.Configuration.ConfigureDevProxyConfig(options);
     environment.Apply(builder.Configuration, options.Env);
+    var changedProxyVariables = proxyEnvironment.GetChangedVariables();
     _ = Announcement.ShowOnceAsync();
     _ = builder.Logging.ConfigureDevProxyLogging(builder.Configuration, options);
     var allowedOrigins = ApiSecurity.GetAllowedOrigins(builder.Configuration);
@@ -388,6 +390,13 @@ static WebApplication BuildApplication(DevProxyConfigOptions options, ProcessEnv
 
     var app = builder.Build();
 
+    if (changedProxyVariables.Length > 0)
+    {
+        app.Logger.LogWarning(
+            "Proxy-routing environment variables changed ({EnvironmentVariables}). HTTP proxy settings are cached and cannot be refreshed by hot reload. Stop Dev Proxy and start it again to apply these changes.",
+            string.Join(", ", changedProxyVariables));
+    }
+
     _ = app.Use((context, next) => ApiSecurity.CheckOriginAsync(context, next, allowedOrigins));
     _ = app.UseCors();
     _ = app.Use(ApiSecurity.AuthenticateAsync);
@@ -396,11 +405,11 @@ static WebApplication BuildApplication(DevProxyConfigOptions options, ProcessEnv
     return app;
 }
 
-static async Task<int> RunProxyAsync(string[] args, DevProxyConfigOptions options)
+static async Task<int> RunProxyAsync(string[] args, DevProxyConfigOptions options, HttpProxyEnvironment proxyEnvironment)
 {
     // Keep overrides through host shutdown, but restore inherited values before a hot reload.
     using var environment = new ProcessEnvironment();
-    var app = BuildApplication(options, environment);
+    var app = BuildApplication(options, environment, proxyEnvironment);
     try
     {
         var devProxyCommand = app.Services.GetRequiredService<DevProxyCommand>();
@@ -427,6 +436,7 @@ options.ParseOptions(args);
 
 int exitCode;
 bool shouldRestart;
+var proxyEnvironment = new HttpProxyEnvironment();
 do
 {
     try
@@ -436,7 +446,7 @@ do
         // RunProxyAsync only returns after the host has fully stopped, which
         // means the proxy engine's shutdown (including system proxy
         // deregistration) has completed — so it's safe to start a new instance.
-        exitCode = await RunProxyAsync(args, options);
+        exitCode = await RunProxyAsync(args, options, proxyEnvironment);
 
         shouldRestart = ConfigFileWatcher.IsRestarting;
     }

@@ -534,7 +534,7 @@ sealed class DevProxyCommand : RootCommand
         {
             AllowMultipleArgumentsPerToken = true,
             Arity = ArgumentArity.ZeroOrMore,
-            Description = "Environment variables to set for the Dev Proxy process, in name=value format. Also used to replace {name} placeholders in API spec files used by the MinimalPermissions plugins",
+            Description = "Environment variables to set for the Dev Proxy process, in name=value format. Also used to replace {name} placeholders in API spec files used by the MinimalPermissions plugins. Changes to HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, or NO_PROXY (including lowercase variants) require a full stop/start; hot reload cannot refresh cached HTTP proxy settings",
             HelpName = "env",
         };
         envOption.Validators.Add(input =>
