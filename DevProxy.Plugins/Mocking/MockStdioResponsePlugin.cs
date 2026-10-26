@@ -311,9 +311,9 @@ public class MockStdioResponsePlugin(
 
     private static string GetMockKey(MockStdioResponse mockResponse)
     {
-        return mockResponse.Request?.BodyRegex
-            ?? mockResponse.Request?.BodyFragment
-            ?? "default";
+        return !string.IsNullOrEmpty(mockResponse.Request?.BodyRegex)
+            ? $"regex:{mockResponse.Request.BodyRegex}"
+            : $"fragment:{mockResponse.Request?.BodyFragment}";
     }
 
     private void ProcessMockResponse(StdioRequestArgs e, MockStdioResponse matchingResponse)

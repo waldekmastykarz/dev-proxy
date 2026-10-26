@@ -55,9 +55,11 @@ public class MockResponsePlugin(
     private const string _mocksFileOptionName = "--mocks-file";
 
     private readonly IProxyConfiguration _proxyConfiguration = proxyConfiguration;
-    // tracks the number of intercepted requests matching each mock URL
+    // tracks the number of intercepted requests matching each effective matcher
     // used in combination with mocks that have an Nth property
-    private readonly ConcurrentDictionary<string, int> _requestCounts = [];
+    private readonly ConcurrentDictionary<MockRequestKey, int> _requestCounts = [];
+
+    private readonly record struct MockRequestKey(string Method, string Url, string? BodyFragment);
 
     private MockResponsesLoader? _loader;
     private Argument<IEnumerable<string>>? _httpResponseFilesArgument;
@@ -296,18 +298,24 @@ public class MockResponsePlugin(
             .Where(mockResponse => MatchesRequest(mockResponse, request))
             .ToList();
 
-        // count the intercepted request once for each mock URL it matches,
+        // count the intercepted request once for each effective matcher,
         // regardless of whether a mock is eventually applied, so that
         // mocks with an Nth property fire on the nth matching request
-        var requestCounts = new Dictionary<string, int>();
-        foreach (var url in matchingMocks.Select(m => m.Request!.Url).Distinct())
+        var requestCounts = new Dictionary<MockRequestKey, int>();
+        foreach (var key in matchingMocks.Select(GetMockKey).Distinct())
         {
-            requestCounts[url] = _requestCounts.AddOrUpdate(url, 1, (_, value) => value + 1);
+            requestCounts[key] = _requestCounts.AddOrUpdate(key, 1, (_, value) => value + 1);
         }
 
         return matchingMocks.FirstOrDefault(mockResponse =>
             mockResponse.Request!.Nth is null ||
-            mockResponse.Request.Nth == requestCounts[mockResponse.Request.Url]);
+            mockResponse.Request.Nth == requestCounts[GetMockKey(mockResponse)]);
+    }
+
+    private static MockRequestKey GetMockKey(MockResponse mockResponse)
+    {
+        var request = mockResponse.Request!;
+        return new(request.Method, request.Url, request.Method == "GET" ? null : request.BodyFragment);
     }
 
     private static bool MatchesRequest(MockResponse mockResponse, IHttpRequest request)

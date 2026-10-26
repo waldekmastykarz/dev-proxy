@@ -361,8 +361,10 @@ public sealed class ManipulationAndMockingIntegrationTests
         Assert.Equal(HttpStatusCode.OK, third.StatusCode);
     }
 
-    [Fact]
-    public async Task MockResponse_Nth_WithFallbackMock_AppliesOnNthRequest()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("ignored-on-get")]
+    public async Task MockResponse_Nth_WithFallbackMock_AppliesOnNthRequest(string? bodyFragment)
     {
         await using var origin = await FakeOrigin.StartAsync();
         var urls = KestrelProxyHarness.BuildUrlsToWatch(origin.Host);
@@ -371,7 +373,7 @@ public sealed class ManipulationAndMockingIntegrationTests
             {
               "mocks": [
                 {
-                  "request": { "url": "http://{{origin.Host}}/get", "method": "GET", "nth": 2 },
+                  "request": { "url": "http://{{origin.Host}}/get", "method": "GET", "bodyFragment": {{System.Text.Json.JsonSerializer.Serialize(bodyFragment)}}, "nth": 2 },
                   "response": { "statusCode": 201, "body": "nth-mock" }
                 },
                 {
@@ -400,6 +402,50 @@ public sealed class ManipulationAndMockingIntegrationTests
         Assert.Equal(HttpStatusCode.Created, second.StatusCode);
 
         using var third = await client.GetAsync(uri);
+        Assert.Equal(HttpStatusCode.Accepted, third.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("alpha", "beta")]
+    public async Task MockResponse_Nth_DistinctMatchersHaveIndependentCounts(
+        string? firstBody, string? secondBody)
+    {
+        await using var origin = await FakeOrigin.StartAsync();
+        var urls = KestrelProxyHarness.BuildUrlsToWatch(origin.Host);
+        var firstMethod = firstBody is null ? "GET" : "POST";
+        var config = PluginConfig.FromJson($$"""
+            {
+              "mocks": [
+                {
+                  "request": { "url": "http://{{origin.Host}}/echo", "method": "{{firstMethod}}", "bodyFragment": {{System.Text.Json.JsonSerializer.Serialize(firstBody)}}, "nth": 1 },
+                  "response": { "statusCode": 201 }
+                },
+                {
+                  "request": { "url": "http://{{origin.Host}}/echo", "method": "POST", "bodyFragment": {{System.Text.Json.JsonSerializer.Serialize(secondBody)}}, "nth": 2 },
+                  "response": { "statusCode": 202 }
+                }
+              ]
+            }
+            """);
+        using var plugin = new MockResponsePlugin(
+            SharedHttpClient, NullLogger<MockResponsePlugin>.Instance, urls, ProxyConfig, config);
+        await using var proxy = await KestrelProxyHarness.StartAsync(origin.Host, [plugin]);
+        using var client = proxy.CreateHttpClient();
+        var uri = new Uri($"http://{origin.Host}/echo");
+
+        using var first = await client.PostAsync(uri, new StringContent(secondBody ?? ""));
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        using var request = new HttpRequestMessage(new HttpMethod(firstMethod), uri);
+        if (firstBody is not null)
+        {
+            request.Content = new StringContent(firstBody);
+        }
+        using var second = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Created, second.StatusCode);
+
+        using var third = await client.PostAsync(uri, new StringContent(secondBody ?? ""));
         Assert.Equal(HttpStatusCode.Accepted, third.StatusCode);
     }
 
