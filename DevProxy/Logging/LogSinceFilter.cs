@@ -16,9 +16,63 @@ namespace DevProxy.Logging;
 /// messages and the <c>timestamp</c> property of JSON log lines. A line
 /// without a timestamp is assigned the most recent preceding timestamp.
 /// </summary>
-internal static partial class LogSinceFilter
+internal sealed partial class LogSinceFilter(DateTime logStartTime, DateTime? sinceTime)
 {
     private static readonly TimeSpan _outOfOrderTolerance = TimeSpan.FromMinutes(1);
+    private readonly List<string> _pendingLines = [];
+    private DateTime _current = logStartTime;
+    private bool _inRequestBlock;
+
+    internal IReadOnlyList<string> AppendLine(string line)
+    {
+        if (sinceTime is null)
+        {
+            return [line];
+        }
+
+        List<string> result = [];
+        var startsRequest = RequestStartRegex().IsMatch(line);
+        if (_inRequestBlock && startsRequest)
+        {
+            result.AddRange(ProcessPendingLines());
+            _inRequestBlock = false;
+        }
+
+        _pendingLines.Add(line);
+        _inRequestBlock |= startsRequest;
+        if (_inRequestBlock)
+        {
+            if (RequestEndRegex().IsMatch(line))
+            {
+                result.AddRange(ProcessPendingLines());
+                _inRequestBlock = false;
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(line))
+        {
+            // Keep blank lines until the next entry identifies their timestamp.
+            result.AddRange(ProcessPendingLines());
+        }
+
+        return result;
+    }
+
+    private List<string> ProcessPendingLines()
+    {
+        var times = GetLineTimes(_pendingLines, _current);
+        List<string> result = [];
+        for (var i = 0; i < _pendingLines.Count; i++)
+        {
+            if (times[i] >= sinceTime)
+            {
+                result.Add(_pendingLines[i]);
+            }
+        }
+
+        _current = times[^1];
+        _pendingLines.Clear();
+        return result;
+    }
 
     public static IEnumerable<string> Filter(IReadOnlyList<string> lines, DateTime logStartTime, DateTime sinceTime)
     {
@@ -127,16 +181,22 @@ internal static partial class LogSinceFilter
         return TryGetJsonTimestamp(line, out timestamp);
     }
 
-    private static DateTime ResolveTimeOfDay(TimeSpan timeOfDay, DateTime current)
+    internal static DateTime ResolveTimeOfDay(TimeSpan timeOfDay, DateTime current, TimeZoneInfo? timeZone = null)
     {
         var candidate = current.Date.Add(timeOfDay);
+        timeZone ??= TimeZoneInfo.Local;
 
         // Log lines are written in order, so a time of day earlier than the
-        // previous timestamp means the log crossed midnight. Allow for small
-        // differences caused by concurrent writes.
+        // previous timestamp normally means midnight. During the repeated DST
+        // hour, however, the clock can move backwards on the same date.
         if (candidate < current - _outOfOrderTolerance)
         {
-            candidate = candidate.AddDays(1);
+            var currentWallTime = DateTime.SpecifyKind(current, DateTimeKind.Unspecified);
+            var candidateWallTime = DateTime.SpecifyKind(candidate, DateTimeKind.Unspecified);
+            if (!timeZone.IsAmbiguousTime(currentWallTime) || !timeZone.IsAmbiguousTime(candidateWallTime))
+            {
+                candidate = candidate.AddDays(1);
+            }
         }
         else if (candidate - current > TimeSpan.FromDays(1) - _outOfOrderTolerance)
         {

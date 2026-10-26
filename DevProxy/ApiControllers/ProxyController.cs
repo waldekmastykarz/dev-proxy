@@ -191,17 +191,14 @@ public sealed class ProxyController(IProxyStateController proxyStateController, 
 
     private async Task StreamLogsAsync(string logFile, int initialLines, string? since, bool useJson, CancellationToken cancellationToken)
     {
-        // Write initial lines
-        var allLines = await ReadAllLinesAsync(logFile, cancellationToken);
-        var filteredLines = FilterLines(allLines, since).TakeLast(initialLines).ToList();
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        using var reader = new LogFileReader(logFile, process.StartTime, ParseSinceOption(since));
+        var filteredLines = (await reader.ReadLinesAsync(cancellationToken)).TakeLast(initialLines);
 
         foreach (var line in filteredLines)
         {
             await WriteSseEventAsync(line, useJson, cancellationToken);
         }
-
-        // Follow new lines
-        var lastPosition = new FileInfo(logFile).Length;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -209,19 +206,9 @@ public sealed class ProxyController(IProxyStateController proxyStateController, 
 
             try
             {
-                using var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                if (fs.Length > lastPosition)
+                foreach (var line in await reader.ReadLinesAsync(cancellationToken))
                 {
-                    _ = fs.Seek(lastPosition, SeekOrigin.Begin);
-                    using var reader = new StreamReader(fs);
-
-                    string? line;
-                    while ((line = await reader.ReadLineAsync(cancellationToken)) != null)
-                    {
-                        await WriteSseEventAsync(line, useJson, cancellationToken);
-                    }
-
-                    lastPosition = fs.Length;
+                    await WriteSseEventAsync(line, useJson, cancellationToken);
                 }
             }
             catch (IOException)

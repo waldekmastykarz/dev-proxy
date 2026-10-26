@@ -87,17 +87,24 @@ internal sealed class LogsCommand : Command
         }
 
         var sinceTime = ParseSinceOption(since);
+        var logStartTime = GetLogStartTime(state);
 
         if (follow)
         {
-            await FollowLogFileAsync(logFile, lines, sinceTime, state.StartedAt.LocalDateTime, cancellationToken);
+            await FollowLogFileAsync(logFile, lines, sinceTime, logStartTime, cancellationToken);
         }
         else
         {
-            await ShowLastLinesAsync(logFile, lines, sinceTime, state.StartedAt.LocalDateTime);
+            await ShowLastLinesAsync(logFile, lines, sinceTime, logStartTime);
         }
 
         return 0;
+    }
+
+    internal static DateTime GetLogStartTime(ProxyInstanceState state)
+    {
+        using var process = System.Diagnostics.Process.GetProcessById(state.Pid);
+        return process.StartTime;
     }
 
     internal static string? GetMultipleInstancesNotice(ProxyInstanceState selected, IReadOnlyCollection<ProxyInstanceState> states)
@@ -168,11 +175,11 @@ internal sealed class LogsCommand : Command
 
     private static async Task FollowLogFileAsync(string logFile, int initialLines, DateTime? sinceTime, DateTime logStartTime, CancellationToken cancellationToken)
     {
-        // Show initial lines
-        await ShowLastLinesAsync(logFile, initialLines, sinceTime, logStartTime);
-
-        // Follow new lines using FileSystemWatcher and reading from last position
-        var lastPosition = new FileInfo(logFile).Length;
+        using var reader = new LogFileReader(logFile, logStartTime, sinceTime);
+        foreach (var line in (await reader.ReadLinesAsync(cancellationToken)).TakeLast(initialLines))
+        {
+            Console.WriteLine(line);
+        }
 
         using var watcher = new FileSystemWatcher(Path.GetDirectoryName(logFile)!, Path.GetFileName(logFile))
         {
@@ -205,24 +212,9 @@ internal sealed class LogsCommand : Command
                     // Timeout - check for new content anyway
                 }
 
-                // Read new content
-                using var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                if (fs.Length > lastPosition)
+                foreach (var line in await reader.ReadLinesAsync(cancellationToken))
                 {
-                    _ = fs.Seek(lastPosition, SeekOrigin.Begin);
-                    using var reader = new StreamReader(fs);
-
-                    string? line;
-                    while ((line = await reader.ReadLineAsync(cancellationToken)) != null)
-                    {
-                        // New lines are written now
-                        if (sinceTime == null || DateTime.Now >= sinceTime.Value)
-                        {
-                            Console.WriteLine(line);
-                        }
-                    }
-
-                    lastPosition = fs.Length;
+                    Console.WriteLine(line);
                 }
             }
             catch (IOException)

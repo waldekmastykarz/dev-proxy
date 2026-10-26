@@ -207,7 +207,7 @@
     },
     "showTimestamps": {
       "type": "boolean",
-      "description": "Show timestamps in log output."
+      "description": "Show request timestamps in interactive log output. Detached log files always include timestamps so logs can be filtered by date and time."
     },
     "timeoutSeconds": {
       "type": "integer",

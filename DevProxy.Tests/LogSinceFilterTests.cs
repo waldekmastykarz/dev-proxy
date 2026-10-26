@@ -133,6 +133,117 @@ public class LogSinceFilterTests
         Assert.Equal(timestamp, times[1]);
     }
 
+    [Theory]
+    [InlineData("America/New_York", 11, 1, 1, 0)]
+    [InlineData("Europe/Berlin", 10, 25, 2, 0)]
+    [InlineData("Australia/Lord_Howe", 4, 5, 1, 30)]
+    public void ResolveTimeOfDay_DaylightSavingRollback_KeepsSameDate(string zoneId, int month, int day, int hour, int minute)
+    {
+        var timeZone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        var current = new DateTime(2026, month, day, hour, 59, 59);
+        var timeOfDay = new TimeSpan(hour, minute, 1);
+
+        var timestamp = LogSinceFilter.ResolveTimeOfDay(timeOfDay, current, timeZone);
+
+        Assert.Equal(current.Date.Add(timeOfDay), timestamp);
+        Assert.True(timestamp < current.Date.AddDays(1));
+    }
+
+    [Fact]
+    public async Task ReadLinesAsync_RequestFinishesAfterCutoff_FiltersByEventTimeAcrossReads()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            var cutoff = _start.AddHours(1);
+            var oldRequest = RequestBlock("https://example.com/old", cutoff.AddSeconds(-1));
+            var newRequest = RequestBlock("https://example.com/new", cutoff);
+            await File.WriteAllTextAsync(path, string.Join('\n', oldRequest[..2]) + "\n");
+            using var reader = new LogFileReader(path, _start, cutoff);
+
+            Assert.Empty(await reader.ReadLinesAsync(CancellationToken.None));
+
+            await File.AppendAllTextAsync(path, string.Join('\n', oldRequest[2..]) + "\n");
+            Assert.Empty(await reader.ReadLinesAsync(CancellationToken.None));
+
+            await File.AppendAllTextAsync(path, string.Join('\n', newRequest[..3]) + "\n");
+            Assert.Empty(await reader.ReadLinesAsync(CancellationToken.None));
+
+            await File.AppendAllTextAsync(path, string.Join('\n', newRequest[3..]) + "\n");
+            Assert.Equal(newRequest, await reader.ReadLinesAsync(CancellationToken.None));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task ReadLinesAsync_PartialLinesAndMidnight_RetainsReconstructionState()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            var beforeMidnight = " dbug    [23:59:59.0000000] before midnight";
+            var afterMidnight = " dbug    [00:00:01.0000000] after midnight";
+            var cutoff = _start.Date.AddDays(1);
+            await File.WriteAllTextAsync(path, beforeMidnight + "\r\n");
+            using var reader = new LogFileReader(path, _start, cutoff);
+
+            Assert.Empty(await reader.ReadLinesAsync(CancellationToken.None));
+
+            await File.AppendAllTextAsync(path, afterMidnight[..20]);
+            Assert.Empty(await reader.ReadLinesAsync(CancellationToken.None));
+
+            await File.AppendAllTextAsync(path, afterMidnight[20..] + "\r\n");
+            Assert.Equal([afterMidnight], await reader.ReadLinesAsync(CancellationToken.None));
+            Assert.Empty(await reader.ReadLinesAsync(CancellationToken.None));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task ReadLinesAsync_JsonLines_UsesEventTimeInsteadOfReadTime()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            var cutoff = _start.AddHours(1);
+            var oldLine = $$"""{"timestamp":"{{new DateTimeOffset(_start):O}}","message":"old"}""";
+            var newLine = $$"""{"timestamp":"{{new DateTimeOffset(cutoff):O}}","message":"new"}""";
+            using var reader = new LogFileReader(path, _start, cutoff);
+
+            await File.AppendAllTextAsync(path, oldLine + "\n" + newLine + "\n");
+
+            Assert.Equal([newLine], await reader.ReadLinesAsync(CancellationToken.None));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task ReadLinesAsync_NoSince_EmitsLinesWithoutWaitingForRequestEnd()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            string[] lines = ["", " req   \u256d GET https://example.com", " info    hello"];
+            await File.WriteAllTextAsync(path, string.Join('\n', lines) + "\n");
+            using var reader = new LogFileReader(path, _start, null);
+
+            Assert.Equal(lines, await reader.ReadLinesAsync(CancellationToken.None));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Fact]
     public void FilterLines_NoSince_ReturnsAllLines()
     {
