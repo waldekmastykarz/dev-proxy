@@ -231,14 +231,20 @@ sealed class DevProxyCommand : RootCommand
                 return field;
             }
 
-            var args = Environment.GetCommandLineArgs();
-            field = args.Contains(NoColorOptionName) ||
-                Environment.GetEnvironmentVariable("NO_COLOR") is not null ||
-                string.Equals(Environment.GetEnvironmentVariable("TERM"), "dumb", StringComparison.OrdinalIgnoreCase);
+            field = ShouldDisableColor(
+                Environment.GetCommandLineArgs(),
+                Environment.GetEnvironmentVariable("NO_COLOR"),
+                Environment.GetEnvironmentVariable("TERM"));
             _noColorResolved = true;
             return field;
         }
     }
+
+    // Per https://no-color.org, NO_COLOR disables color only when present and not empty.
+    internal static bool ShouldDisableColor(string[] args, string? noColorEnv, string? termEnv) =>
+        args.Contains(NoColorOptionName) ||
+        !string.IsNullOrEmpty(noColorEnv) ||
+        string.Equals(termEnv, "dumb", StringComparison.OrdinalIgnoreCase);
 
     public DevProxyCommand(
         IEnumerable<IPlugin> plugins,
@@ -246,7 +252,7 @@ sealed class DevProxyCommand : RootCommand
         IProxyConfiguration proxyConfiguration,
         IServiceProvider serviceProvider,
         UpdateNotification updateNotification,
-        ILogger<DevProxyCommand> logger) : base($"Start Dev Proxy\n\nAPI:\n  Dev Proxy exposes an authenticated REST API for runtime management.\n  OpenAPI spec: {ApiSecurity.GetApiUrl(new UriBuilder(Uri.UriSchemeHttp, proxyConfiguration.ApiIpAddress, proxyConfiguration.ApiPort).Uri.AbsoluteUri)}/swagger\n  Use --api-port (default: {proxyConfiguration.ApiPort}) and --api-ip-address (default: 127.0.0.1).\n  The API bind address is independent of --ip-address.\n  Run 'devproxy status' for the API URL and token, or 'devproxy api show' for endpoints.")
+        ILogger<DevProxyCommand> logger) : base($"Start Dev Proxy\n\nAPI:\n  Dev Proxy exposes an authenticated REST API for runtime management.\n  Use --api-port (default: {proxyConfiguration.ApiPort}) and --api-ip-address (default: 127.0.0.1).\n  The API bind address is independent of --ip-address.\n  Run 'devproxy status' for the API URL and token, or 'devproxy api show' for endpoints.")
     {
         _serviceProvider = serviceProvider;
         _plugins = plugins;
@@ -674,6 +680,15 @@ sealed class DevProxyCommand : RootCommand
         }
     }
 
+    internal static void ApplyDiscoverOption(IProxyConfiguration proxyConfiguration, bool? isDiscover)
+    {
+        // Discovery mode requires recording, but --discover false must not enable it
+        if (isDiscover == true)
+        {
+            proxyConfiguration.Record = true;
+        }
+    }
+
     private void ConfigureFromOptions(ParseResult parseResult)
     {
         var port = parseResult.GetValueOrDefault<int?>(PortOptionName);
@@ -742,11 +757,7 @@ sealed class DevProxyCommand : RootCommand
         {
             _proxyConfiguration.TimeoutSeconds = timeout.Value;
         }
-        var isDiscover = parseResult.GetValueOrDefault<bool?>(DiscoverOptionName);
-        if (isDiscover is not null)
-        {
-            _proxyConfiguration.Record = true;
-        }
+        ApplyDiscoverOption(_proxyConfiguration, parseResult.GetValueOrDefault<bool?>(DiscoverOptionName));
         var env = parseResult.GetValueOrDefault<string[]?>(EnvOptionName);
         if (env is not null)
         {
