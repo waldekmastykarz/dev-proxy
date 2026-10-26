@@ -14,6 +14,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
+// Keep management files discoverable even when env overrides change user data paths.
+_ = StateManager.GetConfigFolder();
+
 // Handle detached mode - spawn a child process and exit
 // Only applies to root command (starting the proxy), not subcommands
 if (DevProxyCommand.IsRootCommand &&
