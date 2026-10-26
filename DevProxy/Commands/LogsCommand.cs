@@ -86,7 +86,7 @@ internal sealed class LogsCommand : Command
             return 1;
         }
 
-        var sinceTime = ParseSinceOption(since);
+        var sinceTime = LogSinceFilter.ParseSinceOption(since);
         var logStartTime = GetLogStartTime(state);
 
         if (follow)
@@ -101,7 +101,7 @@ internal sealed class LogsCommand : Command
         return 0;
     }
 
-    internal static DateTime GetLogStartTime(ProxyInstanceState state)
+    internal static DateTimeOffset GetLogStartTime(ProxyInstanceState state)
     {
         using var process = System.Diagnostics.Process.GetProcessById(state.Pid);
         return process.StartTime;
@@ -123,40 +123,7 @@ internal sealed class LogsCommand : Command
             $"Other instances: {string.Join(", ", otherPids)}. Use --pid to show logs from a specific instance.";
     }
 
-    private static DateTime? ParseSinceOption(string? since)
-    {
-        if (string.IsNullOrEmpty(since))
-        {
-            return null;
-        }
-
-        // Try parsing as a duration (e.g., "5m", "1h", "30s")
-        if (since.Length >= 2)
-        {
-            var unit = since[^1];
-            if (int.TryParse(since[..^1], out var value))
-            {
-                return unit switch
-                {
-                    's' => DateTime.Now.AddSeconds(-value),
-                    'm' => DateTime.Now.AddMinutes(-value),
-                    'h' => DateTime.Now.AddHours(-value),
-                    'd' => DateTime.Now.AddDays(-value),
-                    _ => null
-                };
-            }
-        }
-
-        // Try parsing as a datetime
-        if (DateTime.TryParse(since, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateTime))
-        {
-            return dateTime;
-        }
-
-        return null;
-    }
-
-    private static async Task ShowLastLinesAsync(string logFile, int lineCount, DateTime? sinceTime, DateTime logStartTime)
+    private static async Task ShowLastLinesAsync(string logFile, int lineCount, DateTimeOffset? sinceTime, DateTimeOffset logStartTime)
     {
         var lines = new List<string>();
         await foreach (var line in File.ReadLinesAsync(logFile))
@@ -173,7 +140,7 @@ internal sealed class LogsCommand : Command
         }
     }
 
-    private static async Task FollowLogFileAsync(string logFile, int initialLines, DateTime? sinceTime, DateTime logStartTime, CancellationToken cancellationToken)
+    private static async Task FollowLogFileAsync(string logFile, int initialLines, DateTimeOffset? sinceTime, DateTimeOffset logStartTime, CancellationToken cancellationToken)
     {
         using var reader = new LogFileReader(logFile, logStartTime, sinceTime);
         foreach (var line in (await reader.ReadLinesAsync(cancellationToken)).TakeLast(initialLines))
@@ -225,7 +192,7 @@ internal sealed class LogsCommand : Command
         }
     }
 
-    internal static IEnumerable<string> FilterLines(IReadOnlyList<string> lines, DateTime? sinceTime, DateTime logStartTime)
+    internal static IEnumerable<string> FilterLines(IReadOnlyList<string> lines, DateTimeOffset? sinceTime, DateTimeOffset logStartTime)
     {
         if (sinceTime == null)
         {

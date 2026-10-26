@@ -85,6 +85,7 @@ static class ILoggingBuilderExtensions
                         formatterOptions.IncludeScopes = true;
                         formatterOptions.ShowSkipMessages = showSkipMessages;
                         formatterOptions.ShowTimestamps = showTimestamps;
+                        formatterOptions.IncludeFullTimestamps = DevProxyCommand.IsInternalDaemon;
                     }
                 )
                 .AddConsoleFormatter<JsonConsoleFormatter, ProxyConsoleFormatterOptions>(formatterOptions =>

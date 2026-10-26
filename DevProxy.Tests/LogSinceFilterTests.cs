@@ -12,14 +12,14 @@ public class LogSinceFilterTests
 {
     private static readonly DateTime _start = new(2026, 10, 19, 22, 0, 0, DateTimeKind.Local);
 
-    private static string TimeLine(DateTime localTime) =>
-        $" time  \u2502 {new DateTimeOffset(localTime).ToUniversalTime():O}";
+    private static string TimeLine(DateTimeOffset timestamp) =>
+        $" time  \u2502 {timestamp:O}";
 
-    private static string[] RequestBlock(string url, DateTime localTime) =>
+    private static string[] RequestBlock(string url, DateTimeOffset timestamp) =>
     [
         "",
         $" req   \u256d GET {url}",
-        TimeLine(localTime),
+        TimeLine(timestamp),
         " skip  \u2502 RetryAfterPlugin: Request not throttled",
         " pass  \u2570 Passed through",
     ];
@@ -143,10 +143,80 @@ public class LogSinceFilterTests
         var current = new DateTime(2026, month, day, hour, 59, 59);
         var timeOfDay = new TimeSpan(hour, minute, 1);
 
-        var timestamp = LogSinceFilter.ResolveTimeOfDay(timeOfDay, current, timeZone);
+        var beforeRollback = new DateTimeOffset(current, timeZone.GetAmbiguousTimeOffsets(current).Max());
+        var timestamp = LogSinceFilter.ResolveTimeOfDay(timeOfDay, beforeRollback, timeZone);
 
-        Assert.Equal(current.Date.Add(timeOfDay), timestamp);
-        Assert.True(timestamp < current.Date.AddDays(1));
+        var expected = new DateTimeOffset(current.Date.Add(timeOfDay), timeZone.GetAmbiguousTimeOffsets(current).Min());
+        Assert.Equal(expected, timestamp);
+        Assert.True(timestamp > beforeRollback);
+    }
+
+    [Theory]
+    [InlineData("request")]
+    [InlineData("json")]
+    [InlineData("text")]
+    public async Task Filter_DaylightSavingRepeatedHour_UsesInstantsInSnapshotsAndFollowers(string format)
+    {
+        var beforeRollback = new DateTimeOffset(2026, 11, 1, 1, 50, 0, TimeSpan.FromHours(-4));
+        var afterRollback = new DateTimeOffset(2026, 11, 1, 1, 20, 0, TimeSpan.FromHours(-5));
+        var cutoff = LogSinceFilter.ParseSinceOption("2026-11-01T01:10:00-05:00")!.Value;
+        var start = beforeRollback.AddHours(-1);
+        var oldLines = FormatEntry(beforeRollback, "old");
+        var newLines = FormatEntry(afterRollback, "new");
+        string[] lines = [.. oldLines, .. newLines];
+
+        Assert.Equal(TimeSpan.FromHours(-5), cutoff.Offset);
+        Assert.Equal(newLines, LogSinceFilter.Filter(lines, start, cutoff));
+        Assert.Equal(newLines, Commands.LogsCommand.FilterLines(lines, cutoff, start));
+
+        var path = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllTextAsync(path, string.Join('\n', oldLines) + "\n");
+            using var reader = new LogFileReader(path, start, cutoff);
+            Assert.Empty(await reader.ReadLinesAsync(CancellationToken.None));
+
+            await File.AppendAllTextAsync(path, string.Join('\n', newLines) + "\n");
+            Assert.Equal(newLines, await reader.ReadLinesAsync(CancellationToken.None));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+
+        string[] FormatEntry(DateTimeOffset timestamp, string message) => format switch
+        {
+            "request" => RequestBlock($"https://example.com/{message}", timestamp),
+            "json" => [$$"""{"timestamp":"{{timestamp:O}}","message":"{{message}}"}"""],
+            _ => [$" warn    [{timestamp:O}] {message}"]
+        };
+    }
+
+    [Theory]
+    [InlineData("2026-11-01T01:50:00-04:00", "2026-11-01T01:10:00-05:00", false)]
+    [InlineData("2026-11-01T01:10:00-05:00", "2026-11-01T01:50:00-04:00", true)]
+    public void Filter_ExplicitOffsetsAcrossRepeatedHour_OrdersByInstant(string eventTime, string since, bool included)
+    {
+        var cutoff = LogSinceFilter.ParseSinceOption(since)!.Value;
+        var line = $$"""{"timestamp":"{{eventTime}}"}""";
+        var result = LogSinceFilter.Filter([line], cutoff.AddHours(-2), cutoff);
+
+        Assert.Equal(included ? [line] : Array.Empty<string>(), result);
+    }
+
+    [Theory]
+    [InlineData("30s", 30)]
+    [InlineData("5m", 300)]
+    [InlineData("1h", 3600)]
+    [InlineData("2d", 172800)]
+    public void ParseSinceOption_Duration_UsesElapsedTime(string since, int seconds)
+    {
+        var earliest = DateTimeOffset.UtcNow.AddSeconds(-seconds);
+        var result = LogSinceFilter.ParseSinceOption(since);
+        var latest = DateTimeOffset.UtcNow.AddSeconds(-seconds);
+
+        Assert.NotNull(result);
+        Assert.InRange(result.Value, earliest, latest);
     }
 
     [Fact]

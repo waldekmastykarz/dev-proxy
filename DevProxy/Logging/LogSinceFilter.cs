@@ -9,18 +9,18 @@ using System.Text.RegularExpressions;
 namespace DevProxy.Logging;
 
 /// <summary>
-/// Filters Dev Proxy log lines by date and time. Most log lines don't carry
-/// a timestamp, so each line's time is reconstructed from the log start time
-/// and the timestamps that the log does contain: request blocks'
+/// Filters Dev Proxy log lines by timestamp instant. Detached regular messages
+/// carry full timestamps; legacy lines are reconstructed from the log start time
+/// and the timestamps that the log contains: request blocks'
 /// <c>time</c> lines (full ISO date), time-of-day prefixes on debug/trace
 /// messages and the <c>timestamp</c> property of JSON log lines. A line
 /// without a timestamp is assigned the most recent preceding timestamp.
 /// </summary>
-internal sealed partial class LogSinceFilter(DateTime logStartTime, DateTime? sinceTime)
+internal sealed partial class LogSinceFilter(DateTimeOffset logStartTime, DateTimeOffset? sinceTime)
 {
     private static readonly TimeSpan _outOfOrderTolerance = TimeSpan.FromMinutes(1);
     private readonly List<string> _pendingLines = [];
-    private DateTime _current = logStartTime;
+    private DateTimeOffset _current = logStartTime;
     private bool _inRequestBlock;
 
     internal IReadOnlyList<string> AppendLine(string line)
@@ -74,7 +74,7 @@ internal sealed partial class LogSinceFilter(DateTime logStartTime, DateTime? si
         return result;
     }
 
-    public static IEnumerable<string> Filter(IReadOnlyList<string> lines, DateTime logStartTime, DateTime sinceTime)
+    public static IEnumerable<string> Filter(IReadOnlyList<string> lines, DateTimeOffset logStartTime, DateTimeOffset sinceTime)
     {
         var lineTimes = GetLineTimes(lines, logStartTime);
         for (var i = 0; i < lines.Count; i++)
@@ -86,9 +86,9 @@ internal sealed partial class LogSinceFilter(DateTime logStartTime, DateTime? si
         }
     }
 
-    internal static DateTime[] GetLineTimes(IReadOnlyList<string> lines, DateTime logStartTime)
+    internal static DateTimeOffset[] GetLineTimes(IReadOnlyList<string> lines, DateTimeOffset logStartTime)
     {
-        var times = new DateTime[lines.Count];
+        var times = new DateTimeOffset[lines.Count];
         var current = logStartTime;
 
         var i = 0;
@@ -158,15 +158,19 @@ internal sealed partial class LogSinceFilter(DateTime logStartTime, DateTime? si
         return lines.Count - 1;
     }
 
-    private static bool TryGetTimestamp(string line, DateTime current, out DateTime timestamp)
+    private static bool TryGetTimestamp(string line, DateTimeOffset current, out DateTimeOffset timestamp)
     {
         timestamp = default;
 
         var match = FullTimestampRegex().Match(line);
+        if (!match.Success)
+        {
+            match = TimestampPrefixRegex().Match(line);
+        }
         if (match.Success &&
             DateTimeOffset.TryParse(match.Groups["timestamp"].Value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateTimeOffset))
         {
-            timestamp = dateTimeOffset.LocalDateTime;
+            timestamp = dateTimeOffset;
             return true;
         }
 
@@ -181,32 +185,40 @@ internal sealed partial class LogSinceFilter(DateTime logStartTime, DateTime? si
         return TryGetJsonTimestamp(line, out timestamp);
     }
 
-    internal static DateTime ResolveTimeOfDay(TimeSpan timeOfDay, DateTime current, TimeZoneInfo? timeZone = null)
+    internal static DateTimeOffset ResolveTimeOfDay(TimeSpan timeOfDay, DateTimeOffset current, TimeZoneInfo? timeZone = null)
     {
-        var candidate = current.Date.Add(timeOfDay);
         timeZone ??= TimeZoneInfo.Local;
+        var currentWallTime = TimeZoneInfo.ConvertTime(current, timeZone).DateTime;
+        var candidate = currentWallTime.Date.Add(timeOfDay);
 
         // Log lines are written in order, so a time of day earlier than the
         // previous timestamp normally means midnight. During the repeated DST
         // hour, however, the clock can move backwards on the same date.
-        if (candidate < current - _outOfOrderTolerance)
+        if (candidate < currentWallTime - _outOfOrderTolerance)
         {
-            var currentWallTime = DateTime.SpecifyKind(current, DateTimeKind.Unspecified);
-            var candidateWallTime = DateTime.SpecifyKind(candidate, DateTimeKind.Unspecified);
-            if (!timeZone.IsAmbiguousTime(currentWallTime) || !timeZone.IsAmbiguousTime(candidateWallTime))
+            if (!timeZone.IsAmbiguousTime(currentWallTime) || !timeZone.IsAmbiguousTime(candidate))
             {
                 candidate = candidate.AddDays(1);
             }
         }
-        else if (candidate - current > TimeSpan.FromDays(1) - _outOfOrderTolerance)
+        else if (candidate - currentWallTime > TimeSpan.FromDays(1) - _outOfOrderTolerance)
         {
             candidate = candidate.AddDays(-1);
         }
 
-        return candidate;
+        if (timeZone.IsAmbiguousTime(candidate))
+        {
+            var instants = timeZone.GetAmbiguousTimeOffsets(candidate)
+                .Select(offset => new DateTimeOffset(candidate, offset))
+                .Order()
+                .ToArray();
+            return instants.FirstOrDefault(instant => instant >= current - _outOfOrderTolerance, instants[^1]);
+        }
+
+        return new DateTimeOffset(candidate, timeZone.GetUtcOffset(candidate));
     }
 
-    private static bool TryGetJsonTimestamp(string line, out DateTime timestamp)
+    private static bool TryGetJsonTimestamp(string line, out DateTimeOffset timestamp)
     {
         timestamp = default;
 
@@ -224,7 +236,7 @@ internal sealed partial class LogSinceFilter(DateTime logStartTime, DateTime? si
                 property.ValueKind == JsonValueKind.String &&
                 DateTimeOffset.TryParse(property.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateTimeOffset))
             {
-                timestamp = dateTimeOffset.LocalDateTime;
+                timestamp = dateTimeOffset;
                 return true;
             }
         }
@@ -233,6 +245,31 @@ internal sealed partial class LogSinceFilter(DateTime logStartTime, DateTime? si
         }
 
         return false;
+    }
+
+    internal static DateTimeOffset? ParseSinceOption(string? since)
+    {
+        if (string.IsNullOrEmpty(since))
+        {
+            return null;
+        }
+
+        if (since.Length >= 2 && int.TryParse(since[..^1], out var value))
+        {
+            var now = DateTimeOffset.UtcNow;
+            return since[^1] switch
+            {
+                's' => now.AddSeconds(-value),
+                'm' => now.AddMinutes(-value),
+                'h' => now.AddHours(-value),
+                'd' => now.AddDays(-value),
+                _ => null
+            };
+        }
+
+        return DateTimeOffset.TryParse(since, CultureInfo.InvariantCulture, DateTimeStyles.None, out var timestamp)
+            ? timestamp
+            : null;
     }
 
     // Optional ANSI escape sequences around labels, in case colored output was captured
@@ -246,6 +283,9 @@ internal sealed partial class LogSinceFilter(DateTime logStartTime, DateTime? si
 
     [GeneratedRegex(@"^\s*" + Ansi + @"\s*time\s*" + Ansi + @"\s*[\u2502\u2570]\s*(?<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s*$")]
     private static partial Regex FullTimestampRegex();
+
+    [GeneratedRegex(@"^(?:\s*" + Ansi + @"\s*(?:trce|dbug|info|warn|fail|crit)\s*" + Ansi + @"\s*(?:[\u2502\u2570]\s*)?)?\[(?<timestamp>\d{4}-\d{2}-\d{2}T[^\]]+)\]")]
+    private static partial Regex TimestampPrefixRegex();
 
     [GeneratedRegex(@"^(?:\s*" + Ansi + @"\s*(?:dbug|trce)\s*" + Ansi + @"\s*)?\[(?<time>\d{2}:\d{2}:\d{2}\.(?:\d{7}|\d{3}))\]")]
     private static partial Regex TimeOfDayRegex();

@@ -10,7 +10,7 @@ internal sealed class LogFileReader : IDisposable
     private readonly LogSinceFilter _filter;
     private string _partialLine = string.Empty;
 
-    public LogFileReader(string path, DateTime logStartTime, DateTime? sinceTime)
+    public LogFileReader(string path, DateTimeOffset logStartTime, DateTimeOffset? sinceTime)
     {
         _reader = new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite));
         _filter = new LogSinceFilter(logStartTime, sinceTime);

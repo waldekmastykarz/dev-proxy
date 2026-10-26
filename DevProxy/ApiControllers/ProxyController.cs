@@ -192,7 +192,7 @@ public sealed class ProxyController(IProxyStateController proxyStateController, 
     private async Task StreamLogsAsync(string logFile, int initialLines, string? since, bool useJson, CancellationToken cancellationToken)
     {
         using var process = System.Diagnostics.Process.GetCurrentProcess();
-        using var reader = new LogFileReader(logFile, process.StartTime, ParseSinceOption(since));
+        using var reader = new LogFileReader(logFile, process.StartTime, LogSinceFilter.ParseSinceOption(since));
         var filteredLines = (await reader.ReadLinesAsync(cancellationToken)).TakeLast(initialLines);
 
         foreach (var line in filteredLines)
@@ -241,7 +241,7 @@ public sealed class ProxyController(IProxyStateController proxyStateController, 
             return lines;
         }
 
-        var sinceTime = ParseSinceOption(since);
+        var sinceTime = LogSinceFilter.ParseSinceOption(since);
         if (sinceTime == null)
         {
             return lines;
@@ -249,39 +249,6 @@ public sealed class ProxyController(IProxyStateController proxyStateController, 
 
         using var process = System.Diagnostics.Process.GetCurrentProcess();
         return LogSinceFilter.Filter(lines, process.StartTime, sinceTime.Value);
-    }
-
-    private static DateTime? ParseSinceOption(string? since)
-    {
-        if (string.IsNullOrEmpty(since))
-        {
-            return null;
-        }
-
-        // Try parsing as a duration (e.g., "5m", "1h", "30s")
-        if (since.Length >= 2)
-        {
-            var unit = since[^1];
-            if (int.TryParse(since[..^1], out var value))
-            {
-                return unit switch
-                {
-                    's' => DateTime.Now.AddSeconds(-value),
-                    'm' => DateTime.Now.AddMinutes(-value),
-                    'h' => DateTime.Now.AddHours(-value),
-                    'd' => DateTime.Now.AddDays(-value),
-                    _ => null
-                };
-            }
-        }
-
-        // Try parsing as a datetime
-        if (DateTime.TryParse(since, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var dateTime))
-        {
-            return dateTime;
-        }
-
-        return null;
     }
 
     private static LogEntryDto ParseLogLine(string line)
