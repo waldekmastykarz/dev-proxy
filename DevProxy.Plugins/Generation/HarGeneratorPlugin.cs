@@ -116,7 +116,7 @@ public sealed class HarGeneratorPlugin(
 
         // Rebuild the query string, preserving the original encoding of
         // non-sensitive parameters and redacting only sensitive values.
-        var query = string.Join('&', uri.Query.TrimStart('?').Split('&').Select(pair =>
+        var query = string.Join('&', uri.Query[1..].Split('&').Select(pair =>
         {
             var parts = pair.Split('=', 2);
             return parts.Length == 2 && IsSensitiveQueryParameter(HttpUtility.UrlDecode(parts[0]))
@@ -124,7 +124,7 @@ public sealed class HarGeneratorPlugin(
                 : pair;
         }));
 
-        return new UriBuilder(uri) { Query = query }.Uri.ToString();
+        return new UriBuilder(uri) { Query = $"?{query}" }.Uri.ToString();
     }
 
     private HarEntry CreateHarEntry(RequestLog log)

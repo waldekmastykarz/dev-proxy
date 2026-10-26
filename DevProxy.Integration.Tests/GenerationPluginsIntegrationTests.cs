@@ -120,6 +120,35 @@ public sealed class GenerationPluginsIntegrationTests
         Assert.Equal("2", query["page"]);
     }
 
+    [Theory]
+    [InlineData("?page")]
+    [InlineData("??page")]
+    [InlineData("?access_token")]
+    public async Task HarGenerator_PreservesParameterLeadingQuestionMarks(string parameterName)
+    {
+        var plugin = new HarGeneratorPlugin(
+            TestDefaults.HttpClient,
+            NullLogger<HarGeneratorPlugin>.Instance,
+            Watch,
+            new TestProxyConfiguration(),
+            PluginConfig.Empty());
+
+        var log = TestExchange
+            .Request("GET", $"https://api.contoso.com/users?{parameterName}=2&access_token=secret")
+            .WithResponse(HttpStatusCode.OK)
+            .AsRequestLog(MessageType.InterceptedResponse);
+
+        var entry = await GenerateSingleHarEntryAsync(plugin, log);
+        var request = entry.GetProperty("request");
+
+        Assert.Equal($"https://api.contoso.com/users?{parameterName}=2&access_token=REDACTED",
+            request.GetProperty("url").GetString());
+        var query = request.GetProperty("queryString").EnumerateArray()
+            .ToDictionary(q => q.GetProperty("name").GetString()!, q => q.GetProperty("value").GetString());
+        Assert.Equal("2", query[parameterName]);
+        Assert.Equal("REDACTED", query["access_token"]);
+    }
+
     [Fact]
     public async Task HarGenerator_KeepsCookiesAndQueryParametersWhenIncludingSensitiveInformation()
     {
