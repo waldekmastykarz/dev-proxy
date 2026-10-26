@@ -95,6 +95,7 @@ public sealed class KestrelProxyEngine(
         await using var app = builder.Build();
 
         await app.StartAsync(stoppingToken).ConfigureAwait(false);
+        inactivityTimer?.Reset();
         // When --port 0 is used the OS assigns a free port; Kestrel rewrites the
         // ListenOptions endpoint to the bound port after StartAsync, so log THAT
         // (not the configured 0) so the user can actually connect.

@@ -5,25 +5,76 @@
 namespace DevProxy.Proxy.Kestrel.Internal;
 
 /// <summary>
-/// Invokes <paramref name="timeoutAction"/> once no activity has been reported via
-/// <see cref="Reset"/> for <paramref name="timeoutSeconds"/> seconds.
+/// Starts counting down on the first <see cref="Reset"/> and invokes the timeout
+/// action once no further activity is reported for the configured interval.
 /// </summary>
-internal sealed class InactivityTimer(long timeoutSeconds, Action timeoutAction) : IDisposable
+internal sealed class InactivityTimer : IDisposable
 {
-    private readonly TimeSpan _timeout = TimeSpan.FromSeconds(timeoutSeconds);
-    private readonly Timer _timer = new(_ => timeoutAction.Invoke(), null, TimeSpan.FromSeconds(timeoutSeconds), Timeout.InfiniteTimeSpan);
+    private readonly object _lock = new();
+    private readonly long _timeoutSeconds;
+    private readonly Action _timeoutAction;
+    private readonly TimeProvider _timeProvider;
+    private readonly ITimer _timer;
+    private long _lastActivity;
+    private bool _started;
+    private bool _stopped;
+
+    public InactivityTimer(long timeoutSeconds, Action timeoutAction, TimeProvider? timeProvider = null)
+    {
+        _timeoutSeconds = timeoutSeconds;
+        _timeoutAction = timeoutAction;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _timer = _timeProvider.CreateTimer(OnElapsed, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+    }
 
     public void Reset()
     {
-        try
+        lock (_lock)
         {
-            _ = _timer.Change(_timeout, Timeout.InfiniteTimeSpan);
-        }
-        catch (ObjectDisposedException)
-        {
-            // A request raced with shutdown; nothing left to reset.
+            if (_stopped)
+            {
+                return;
+            }
+
+            _started = true;
+            _lastActivity = _timeProvider.GetTimestamp();
+            _ = _timer.Change(GetTimerInterval(_timeoutSeconds), Timeout.InfiniteTimeSpan);
         }
     }
 
-    public void Dispose() => _timer.Dispose();
+    private void OnElapsed(object? state)
+    {
+        lock (_lock)
+        {
+            if (!_started || _stopped)
+            {
+                return;
+            }
+
+            // Change cannot cancel a callback that has already been queued.
+            var elapsedSeconds = _timeProvider.GetElapsedTime(_lastActivity).Ticks / (decimal)TimeSpan.TicksPerSecond;
+            var remainingSeconds = _timeoutSeconds - elapsedSeconds;
+            if (remainingSeconds > 0)
+            {
+                _ = _timer.Change(GetTimerInterval(remainingSeconds), Timeout.InfiniteTimeSpan);
+                return;
+            }
+
+            _stopped = true;
+            _timeoutAction();
+        }
+    }
+
+    // System.Threading.Timer accepts at most uint.MaxValue - 1 milliseconds.
+    private static TimeSpan GetTimerInterval(decimal remainingSeconds) =>
+        TimeSpan.FromMilliseconds((double)Math.Min(remainingSeconds * 1_000, uint.MaxValue - 1));
+
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            _stopped = true;
+            _timer.Dispose();
+        }
+    }
 }
