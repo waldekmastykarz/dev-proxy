@@ -5,14 +5,14 @@
         },
         "remoteUser": "devuser",
         "features": {
-            "devproxy": {}
+            "dev-proxy": {}
         }
     },
     "specific_version": {
         "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
         "remoteUser": "vscode",
         "features": {
-            "devproxy": {
+            "dev-proxy": {
                 "version": "3.3.0"
             }
         }
@@ -20,7 +20,7 @@
     "specific_version_with_v": {
         "image": "debian:latest",
         "features": {
-            "devproxy": {
+            "dev-proxy": {
                 "version": "v2.2.0"
             }
         }
@@ -29,7 +29,7 @@
         "image": "mcr.microsoft.com/devcontainers/base:debian",
         "remoteUser": "vscode",
         "features": {
-            "devproxy": {
+            "dev-proxy": {
                 "version": "beta"
             }
         }
@@ -40,7 +40,7 @@
         },
         "remoteUser": "devuser",
         "features": {
-            "devproxy": {
+            "dev-proxy": {
                 "trustCertificate": false
             }
         }
@@ -53,7 +53,7 @@
             "ghcr.io/devcontainers/features/dotnet:2": {
                 "version": "10.0"
             },
-            "devproxy": {
+            "dev-proxy": {
                 "version": "beta"
             }
         }

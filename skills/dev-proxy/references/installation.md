@@ -64,7 +64,7 @@ Add the Dev Proxy Feature to `devcontainer.json`:
 
 ```json
 "features": {
-  "ghcr.io/dotnet/dev-proxy/devproxy:1": {}
+  "ghcr.io/dotnet/dev-proxy/dev-proxy:1": {}
 }
 ```
 

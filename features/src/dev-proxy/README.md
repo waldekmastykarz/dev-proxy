@@ -1,4 +1,4 @@
-# Dev Proxy (devproxy)
+# Dev Proxy (dev-proxy)
 
 Installs [Dev Proxy](https://aka.ms/devproxy), an API simulator that helps you test how your app handles API failures, rate limits, latency, and more. Trusts a per-container Dev Proxy root certificate system-wide.
 
@@ -6,7 +6,7 @@ Installs [Dev Proxy](https://aka.ms/devproxy), an API simulator that helps you t
 
 ```json
 "features": {
-    "ghcr.io/dotnet/dev-proxy/devproxy:1": {}
+    "ghcr.io/dotnet/dev-proxy/dev-proxy:1": {}
 }
 ```
 

@@ -1,7 +1,7 @@
 name: Dev Container Feature - Release
 
 # Publishes the Dev Container Feature in features/src to GHCR
-# (ghcr.io/dotnet/dev-proxy/devproxy). To release a new version of the
+# (ghcr.io/dotnet/dev-proxy/dev-proxy). To release a new version of the
 # Feature, bump the version in devcontainer-feature.json. Versions that are
 # already published are skipped.
 
