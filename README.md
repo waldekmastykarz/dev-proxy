@@ -61,6 +61,14 @@ brew install dev-proxy
 bash -c "$(curl -sL https://aka.ms/devproxy/setup.sh)"
 ```
 
+**Dev containers and GitHub Codespaces** (installs Dev Proxy and trusts its certificate in the container, see [the Feature's docs](./features/src/devproxy/README.md)):
+
+```json
+"features": {
+  "ghcr.io/dotnet/dev-proxy/devproxy:1": {}
+}
+```
+
 Download the preset for the API your app calls, and start Dev Proxy with it:
 
 ```bash

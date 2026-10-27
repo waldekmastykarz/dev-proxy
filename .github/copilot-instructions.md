@@ -60,6 +60,7 @@ dotnet run --project DevProxy -- --detach --as-system-proxy false --port 0 --api
 - **CLI Commands:** `DevProxy/Commands/` — built with System.CommandLine, registered via `DevProxyCommand.cs`
 - **Configuration:** `DevProxy/config/devproxyrc.json` and other JSON files in `config/`
 - **macOS scripts:** `trust-cert.sh`, `remove-cert.sh`, `toggle-proxy.sh` in `DevProxy/`
+- **Dev Container Feature:** `features/src/devproxy` (published as `ghcr.io/dotnet/dev-proxy/devproxy`), tests in `features/test/devproxy`. Run tests from `features/` with `npx @devcontainers/cli features test -f devproxy .`. Bump the version in `devcontainer-feature.json` to publish a new Feature version
 
 ## Resources
 
