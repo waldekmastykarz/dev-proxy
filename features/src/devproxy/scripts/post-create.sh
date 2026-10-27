@@ -30,6 +30,10 @@ config_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/dev-proxy"
 mkdir -p "${config_dir}"
 cd "${config_dir}"
 
+# The root certificate's private key is stored without a password. Keep it
+# readable only by the remote user.
+umask 077
+
 if ! devproxy cert ensure </dev/null; then
     echo "(!) Couldn't generate the Dev Proxy root certificate." >&2
     exit 1
@@ -43,6 +47,9 @@ fi
 if [ ! -f "${cert_path}" ]; then
     echo "(!) Dev Proxy root certificate not found at ${cert_path}." >&2
     exit 1
+fi
+if [ -O "${cert_path}" ]; then
+    chmod 0600 "${cert_path}"
 fi
 
 if ! pem="$(openssl pkcs12 -in "${cert_path}" -clcerts -nokeys -passin pass: 2>/dev/null | openssl x509 -outform PEM 2>/dev/null)"; then

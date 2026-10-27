@@ -17,6 +17,7 @@ check "config folder is owned by the user" bash -c "[ \"\$(stat -c %U \"$(devpro
 check "root certificate is in the system store" test -f "${DEVPROXY_TEST_CERT}"
 check "trusted certificate is the user's root certificate" devproxy_cert_matches_profile
 check "root certificate is in the CA bundle" devproxy_cert_in_bundle
+check "root certificate is only readable by the user" bash -c "[ \"\$(stat -c %a \"$(devproxy_config_dir)/rootCert.pfx\")\" = 600 ]"
 check "no certificate outside the user's profile" devproxy_no_stray_certs "$(devproxy_config_dir)"
 check "NODE_EXTRA_CA_CERTS is set" test -f "${NODE_EXTRA_CA_CERTS}"
 check "SSL_CERT_FILE is set" test -f "${SSL_CERT_FILE}"

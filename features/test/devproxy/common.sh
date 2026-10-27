@@ -38,15 +38,32 @@ devproxy_cert_in_bundle() {
 }
 
 # Checks that no Dev Proxy root certificate exists outside of the given home
-# directory (e.g. in root's profile or the install directory).
+# directory (e.g. in root's profile or the install directory). Scans as root
+# when possible and fails if the scan is incomplete. Users without root access
+# can't read root-only folders like /root; root-user scenarios cover those.
 devproxy_no_stray_certs() {
     local allowed_dir="${1:-}"
+    local -a run_as=()
+    if [ "$(id -u)" -ne 0 ]; then
+        if sudo -n true 2>/dev/null; then
+            run_as=(sudo -n)
+        else
+            echo "(!) No root access. Root-only folders aren't scanned." >&2
+        fi
+    fi
     local found
-    found="$(find / -xdev -name 'rootCert.pfx' -not -path '/proc/*' 2>/dev/null || true)"
+    if [ "${#run_as[@]}" -gt 0 ] || [ "$(id -u)" -eq 0 ]; then
+        found="$("${run_as[@]}" find / -xdev -name 'rootCert.pfx' -not -path '/proc/*')" || return 1
+    else
+        found="$(find / -xdev -name 'rootCert.pfx' -not -path '/proc/*' 2>/dev/null || true)"
+    fi
     if [ -n "${allowed_dir}" ]; then
         found="$(echo "${found}" | grep -v "^${allowed_dir}/" || true)"
     fi
-    [ -z "${found}" ]
+    if [ -n "${found}" ]; then
+        echo "Found certificates: ${found}" >&2
+        return 1
+    fi
 }
 
 # Starts Dev Proxy with a mock that answers DEVPROXY_TEST_URL so that tests

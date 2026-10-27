@@ -211,7 +211,7 @@ verify_devproxy() {
     tmp_home="$(mktemp -d)"
     mkdir -p "${tmp_home}/.config" "${tmp_home}/.local/share"
     local installed_version
-    if ! installed_version="$(cd "${tmp_home}" && HOME="${tmp_home}" XDG_CONFIG_HOME="${tmp_home}/.config" XDG_DATA_HOME="${tmp_home}/.local/share" "${BIN_DIR}/devproxy" --version </dev/null 2>/dev/null | tail -n 1)"; then
+    if ! installed_version="$(cd "${tmp_home}" && HOME="${tmp_home}" XDG_CONFIG_HOME="${tmp_home}/.config" XDG_DATA_HOME="${tmp_home}/.local/share" DEV_PROXY_CERT_PATH="${tmp_home}/rootCert.pfx" "${BIN_DIR}/devproxy" --version </dev/null 2>/dev/null | tail -n 1)"; then
         rm -rf "${tmp_home}"
         fail "Dev Proxy was installed but couldn't run. Run 'devproxy --version' in the container for details."
     fi
