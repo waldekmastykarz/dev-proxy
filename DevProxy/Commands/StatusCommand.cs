@@ -133,6 +133,7 @@ internal sealed class StatusCommand : Command
             _logger.LogStructuredOutput(JsonSerializer.Serialize(new
             {
                 state.Pid,
+                state.ProxyUrl,
                 state.ApiUrl,
                 token,
                 apiStatus,
@@ -150,12 +151,12 @@ internal sealed class StatusCommand : Command
         Console.WriteLine(message);
         Console.WriteLine();
         Console.WriteLine($"  PID:              {state.Pid}");
+        Console.WriteLine($"  Proxy URL:        {state.ProxyUrl}");
         Console.WriteLine($"  API URL:          {state.ApiUrl}");
         if (token is not null)
         {
             Console.WriteLine($"  API token:        {token}");
         }
-        Console.WriteLine($"  Port:             {state.Port}");
         Console.WriteLine($"  System proxy:     {(state.AsSystemProxy ? "Yes" : "No")}");
         if (proxyInfo is not null)
         {
