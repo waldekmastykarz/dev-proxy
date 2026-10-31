@@ -1143,6 +1143,30 @@ public sealed class OpenApiValidationPluginTests : IDisposable
     }
 
     [Fact]
+    public async Task ReportsDiscriminatorMappingsOutsideOneOf()
+    {
+        var spec = DiscriminatorSpec
+            .Replace("doggo: '#/components/schemas/Dog'", "doggo: '#/components/schemas/Dog'\n                  fish: '#/components/schemas/Fish'", StringComparison.Ordinal)
+            .Replace("    Lizard:", "    Fish:\n      type: object\n      properties: { fins: { type: integer } }\n    Lizard:", StringComparison.Ordinal);
+        var defaultSpec = spec
+            .Replace("openapi: 3.0.3", "openapi: 3.2.0", StringComparison.Ordinal)
+            .Replace("propertyName: petType", "propertyName: petType\n                defaultMapping: '#/components/schemas/Fish'", StringComparison.Ordinal);
+        var plugin = await CreatePluginWithSpecsAsync(("pets.yaml", spec));
+
+        var stale = plugin.Validate(PostPet("""{ "petType": "fish", "fins": 2 }""").Session);
+        var unknown = plugin.Validate(PostPet("""{ "petType": "Bird" }""").Session);
+
+        Assert.Equal("$.petType: Discriminator value 'fish' maps to schema 'Fish', which isn't one of the schemas in 'oneOf'", Assert.Single(Messages(stale)));
+        Assert.DoesNotContain("'fish'", Assert.Single(Messages(unknown)), StringComparison.Ordinal);
+
+        plugin = await CreatePluginWithSpecsAsync(("pets-default.yaml", defaultSpec));
+
+        var missing = plugin.Validate(PostPet("""{ "fins": 2 }""").Session);
+
+        Assert.Equal("$: Discriminator default mapping maps to schema 'Fish', which isn't one of the schemas in 'oneOf'", Assert.Single(Messages(missing)));
+    }
+
+    [Fact]
     public async Task FallsBackToDiscriminatorDefaultMapping()
     {
         var spec = DiscriminatorSpec

@@ -393,15 +393,19 @@ internal static class OpenApiSchemaValidator
         int depth)
     {
         var propertyName = discriminator.PropertyName!;
-        IOpenApiSchema? selected;
+        var oneOf = schema.OneOf!;
+        var errorPath = path;
+        IOpenApiSchema? candidate;
+        string source;
         if (!value.TryGetProperty(propertyName, out var discriminatorValue))
         {
-            selected = discriminator.DefaultMapping;
-            if (selected is null)
+            if (discriminator.DefaultMapping is null)
             {
                 errors.Add(new(path, $"Missing discriminator property '{propertyName}' required to select a schema in 'oneOf'"));
                 return;
             }
+            candidate = discriminator.DefaultMapping;
+            source = "Discriminator default mapping";
         }
         else if (discriminatorValue.ValueKind != JsonValueKind.String)
         {
@@ -411,16 +415,38 @@ internal static class OpenApiSchemaValidator
         else
         {
             var discriminatorName = discriminatorValue.GetString()!;
-            selected = FindDiscriminatedSchema(schema.OneOf!, discriminator, discriminatorName) ?? discriminator.DefaultMapping;
-            if (selected is null)
+            errorPath = GetPropertyPath(path, propertyName);
+            source = $"Discriminator value '{discriminatorName}'";
+            // explicit mappings take precedence over implicit ones, which use
+            // the name of the referenced component schema
+            candidate = discriminator.Mapping is not null &&
+                discriminator.Mapping.TryGetValue(discriminatorName, out var mapped)
+                ? mapped
+                : oneOf.FirstOrDefault(s => GetSchemaName(s) == discriminatorName);
+            if (candidate is null && discriminator.DefaultMapping is not null)
             {
-                var allowed = GetDiscriminatorValues(schema.OneOf!, discriminator);
+                candidate = discriminator.DefaultMapping;
+                source = "Discriminator default mapping";
+            }
+            if (candidate is null)
+            {
+                var allowed = GetDiscriminatorValues(oneOf, discriminator);
                 var allowedMessage = allowed.Count > 0
                     ? $". Allowed values: {string.Join(", ", allowed.Select(v => $"'{v}'"))}"
                     : string.Empty;
-                errors.Add(new(GetPropertyPath(path, propertyName), $"Discriminator value '{discriminatorName}' doesn't map to any schema in 'oneOf'{allowedMessage}"));
+                errors.Add(new(errorPath, $"Discriminator value '{discriminatorName}' doesn't map to any schema in 'oneOf'{allowedMessage}"));
                 return;
             }
+        }
+
+        // mappings must not select a schema outside the declared alternatives,
+        // otherwise the value could bypass oneOf validation
+        var selected = FindOneOfBranch(oneOf, candidate);
+        if (selected is null)
+        {
+            var schemaName = GetSchemaName(candidate) is { } name ? $"schema '{name}'" : "a schema";
+            errors.Add(new(errorPath, $"{source} maps to {schemaName}, which isn't one of the schemas in 'oneOf'"));
+            return;
         }
 
         var seen = new HashSet<SchemaValidationError>(errors.Skip(firstError));
@@ -433,23 +459,19 @@ internal static class OpenApiSchemaValidator
         }
     }
 
-    // Explicit mappings take precedence over implicit ones, which use
-    // the name of the referenced component schema
-    private static IOpenApiSchema? FindDiscriminatedSchema(IList<IOpenApiSchema> oneOf, OpenApiDiscriminator discriminator, string discriminatorValue)
+    private static IOpenApiSchema? FindOneOfBranch(IList<IOpenApiSchema> oneOf, IOpenApiSchema candidate)
     {
-        if (discriminator.Mapping is not null &&
-            discriminator.Mapping.TryGetValue(discriminatorValue, out var mapped))
-        {
-            return mapped.Target is not null
-                ? mapped
-                : oneOf.FirstOrDefault(s => GetSchemaName(s) == mapped.Reference?.Id);
-        }
-
-        return oneOf.FirstOrDefault(s => GetSchemaName(s) == discriminatorValue);
+        var target = ResolveTarget(candidate);
+        var name = GetSchemaName(candidate);
+        return oneOf.FirstOrDefault(s =>
+            ReferenceEquals(ResolveTarget(s), target) ||
+            (name is not null && GetSchemaName(s) == name));
     }
 
     private static List<string> GetDiscriminatorValues(IList<IOpenApiSchema> oneOf, OpenApiDiscriminator discriminator) =>
-        [.. (discriminator.Mapping?.Keys ?? Enumerable.Empty<string>())
+        [.. (discriminator.Mapping ?? Enumerable.Empty<KeyValuePair<string, OpenApiSchemaReference>>())
+            .Where(m => FindOneOfBranch(oneOf, m.Value) is not null)
+            .Select(m => m.Key)
             .Concat(oneOf.Select(GetSchemaName).OfType<string>())
             .Distinct(StringComparer.Ordinal)];
 
