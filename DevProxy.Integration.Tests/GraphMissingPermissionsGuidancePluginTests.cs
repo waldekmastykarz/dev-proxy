@@ -358,6 +358,21 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
     }
 
     [Fact]
+    public async Task Forbidden_PersonalAccountToken_UsesDelegatedPersonalPermissions()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/me/messages", [("Authorization", BearerToken(scp: "User.Read", tid: "9188040d-6c67-4c5b-b112-36a304b66dad"))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        _ = Assert.Single(factory.LogsOfType(MessageType.Failed));
+        Assert.Contains("scopeType=DelegatedPersonal", Assert.Single(handler.Requests).Query, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Forbidden_NoLeastPrivilegedPermissionMarked_ListsUnrankedAlternatives()
     {
         using var handler = new StubPermissionsHandler("""
@@ -391,9 +406,13 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
         return (plugin, factory);
     }
 
-    private static string BearerToken(string? scp = null, string[]? roles = null, string? oid = null)
+    private static string BearerToken(string? scp = null, string[]? roles = null, string? oid = null, string? tid = null)
     {
         var payload = new Dictionary<string, object> { ["aud"] = "https://graph.microsoft.com" };
+        if (tid is not null)
+        {
+            payload["tid"] = tid;
+        }
         if (oid is not null)
         {
             payload["oid"] = oid;

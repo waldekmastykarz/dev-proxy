@@ -160,29 +160,32 @@ sealed class GraphUtils(
         }
     }
 
-    internal static string[] GetUserIdentifiersFromAuthorizationHeader(string? authorizationHeader)
+    internal static (string[] UserIdentifiers, string? TenantId) GetUserInfoFromAuthorizationHeader(string? authorizationHeader)
     {
         if (string.IsNullOrEmpty(authorizationHeader))
         {
-            return [];
+            return ([], null);
         }
 
         var token = authorizationHeader.Replace("Bearer ", string.Empty, StringComparison.OrdinalIgnoreCase).Trim();
         if (token.Split('.').Length != 3)
         {
-            return [];
+            return ([], null);
         }
 
         try
         {
             var jwtSecurityToken = new JwtSecurityTokenHandler().ReadJwtToken(token);
-            return [.. jwtSecurityToken.Claims
+            var userIdentifiers = jwtSecurityToken.Claims
                 .Where(c => c.Type is "oid" or "upn" or "preferred_username" && !string.IsNullOrEmpty(c.Value))
-                .Select(c => c.Value)];
+                .Select(c => c.Value)
+                .ToArray();
+            var tenantId = jwtSecurityToken.Claims.FirstOrDefault(c => c.Type == "tid")?.Value;
+            return (userIdentifiers, tenantId);
         }
         catch
         {
-            return [];
+            return ([], null);
         }
     }
 

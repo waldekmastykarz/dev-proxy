@@ -22,6 +22,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
     ILogger<GraphMissingPermissionsGuidancePlugin> logger,
     ISet<UrlToWatch> urlsToWatch) : BasePlugin(logger, urlsToWatch)
 {
+    private const string ConsumersTenantId = "9188040d-6c67-4c5b-b112-36a304b66dad";
     private static readonly TimeSpan PermissionsLookupTimeout = TimeSpan.FromSeconds(3);
     private static readonly HashSet<string> SelfOnlyDelegatedPermissions = new(["User.Read", "User.ReadWrite"], StringComparer.OrdinalIgnoreCase);
 
@@ -84,7 +85,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
                 return;
             }
 
-            var (permissionsType, tokenPermissions, userIdentifiers) = GetTokenInfo(request);
+            var (permissionsType, tokenPermissions, userIdentifiers, isPersonalAccount) = GetTokenInfo(request);
             var graphVersion = ProxyUtils.IsGraphBetaUrl(request.RequestUri) ? "beta" : "v1.0";
             // analyze in parallel to limit the delay before the response is sent to the client
             var guidance = await Task.WhenAll(failedRequests.Select(failedRequest =>
@@ -98,6 +99,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
                     permissionsType,
                     tokenPermissions,
                     userIdentifiers,
+                    isPersonalAccount,
                     cancellationToken);
             }));
             foreach (var (message, messageType) in guidance)
@@ -107,7 +109,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
         }
         else if (response.StatusCode == HttpStatusCode.Forbidden)
         {
-            var (permissionsType, tokenPermissions, userIdentifiers) = GetTokenInfo(request);
+            var (permissionsType, tokenPermissions, userIdentifiers, isPersonalAccount) = GetTokenInfo(request);
             var (message, messageType) = await AnalyzeForbiddenRequestAsync(
                 request.Method,
                 request.RequestUri.AbsoluteUri,
@@ -115,6 +117,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
                 permissionsType,
                 tokenPermissions,
                 userIdentifiers,
+                isPersonalAccount,
                 cancellationToken);
             LogGuidance(message, messageType, loggingContext);
         }
@@ -126,14 +129,18 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
         Logger.LogTrace("Left {Name}", nameof(AfterResponseAsync));
     }
 
-    private static (GraphPermissionsType? Type, IEnumerable<string> Permissions, string[] UserIdentifiers) GetTokenInfo(IHttpRequest request)
+    private static (GraphPermissionsType? Type, IEnumerable<string> Permissions, string[] UserIdentifiers, bool IsPersonalAccount) GetTokenInfo(IHttpRequest request)
     {
         var authorizationHeader = request.Headers.GetFirst("Authorization")?.Value;
         var (permissionsType, tokenPermissions) = GraphUtils.GetPermissionsFromAuthorizationHeader(authorizationHeader);
-        var userIdentifiers = permissionsType == GraphPermissionsType.Delegated
-            ? GraphUtils.GetUserIdentifiersFromAuthorizationHeader(authorizationHeader)
-            : [];
-        return (permissionsType, tokenPermissions, userIdentifiers);
+        if (permissionsType != GraphPermissionsType.Delegated)
+        {
+            return (permissionsType, tokenPermissions, [], false);
+        }
+
+        var (userIdentifiers, tenantId) = GraphUtils.GetUserInfoFromAuthorizationHeader(authorizationHeader);
+        var isPersonalAccount = string.Equals(tenantId, ConsumersTenantId, StringComparison.OrdinalIgnoreCase);
+        return (permissionsType, tokenPermissions, userIdentifiers, isPersonalAccount);
     }
 
     private void LogGuidance(string? message, MessageType messageType, LoggingContext loggingContext)
@@ -151,6 +158,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
         GraphPermissionsType? permissionsType,
         IEnumerable<string> tokenPermissions,
         string[] userIdentifiers,
+        bool isPersonalAccount,
         CancellationToken cancellationToken)
     {
         if (permissionsType is null)
@@ -171,7 +179,9 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
                 MessageType.Tip);
         }
 
-        var requiredPermissions = await GetPermissionsAsync(method, tokenizedUrl, permissionsType.Value, cancellationToken);
+        // personal Microsoft accounts support a different set of delegated permissions
+        var scopeType = isPersonalAccount ? "DelegatedPersonal" : GraphUtils.GetScopeTypeString(permissionsType.Value);
+        var requiredPermissions = await GetPermissionsAsync(method, tokenizedUrl, scopeType, cancellationToken);
         if (requiredPermissions is null || requiredPermissions.Length == 0)
         {
             return ($"{requestDescription} failed with 403 Forbidden. Dev Proxy couldn't determine which permissions are required for {method} {tokenizedUrl}. Check the Microsoft Graph API reference for the permissions required to call this API.",
@@ -239,10 +249,9 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
     private async Task<GraphPermissionInfo[]?> GetPermissionsAsync(
         string method,
         string tokenizedUrl,
-        GraphPermissionsType permissionsType,
+        string scopeType,
         CancellationToken cancellationToken)
     {
-        var scopeType = GraphUtils.GetScopeTypeString(permissionsType);
         var cacheKey = $"{scopeType}|{method}|{tokenizedUrl}";
         if (_permissionsCache.TryGetValue(cacheKey, out var cachedPermissions))
         {
