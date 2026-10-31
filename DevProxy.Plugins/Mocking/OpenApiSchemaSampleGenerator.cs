@@ -24,6 +24,9 @@ internal static class OpenApiSchemaSampleGenerator
     /// </summary>
     public static JsonObject Describe(IOpenApiSchema? schema) => Describe(schema, 0, []) ?? [];
 
+    public static bool IsStringSchema(IOpenApiSchema? schema) =>
+        schema is not null && Describe(schema)["type"]?.GetValue<string>() == "string";
+
     private static string? GetReferenceId(IOpenApiSchema schema) =>
         schema is OpenApiSchemaReference reference ? reference.Reference?.ReferenceV3 : null;
 
@@ -238,15 +241,25 @@ internal static class OpenApiSchemaSampleGenerator
     private static JsonArray GenerateArraySample(IOpenApiSchema schema, int depth, HashSet<string> visiting)
     {
         var item = GenerateSample(schema.Items, depth + 1, visiting);
-        if (item is null)
+        // null is a valid item when the item schema allows only null,
+        // otherwise it's a recursion cut-off
+        if (item is null && (schema.Items is null || GetEffectiveType(schema.Items) != JsonSchemaType.Null))
         {
-            // null is a valid item when the item schema allows only null,
-            // otherwise it's a recursion cut-off
-            return schema.Items is not null && GetEffectiveType(schema.Items) == JsonSchemaType.Null ?
-                [null] :
-                [];
+            return [];
         }
-        return [item];
+
+        var count = Math.Max(schema.MinItems ?? 1, 1);
+        if (schema.MaxItems is int maxItems)
+        {
+            count = Math.Min(count, Math.Max(maxItems, 0));
+        }
+
+        var array = new JsonArray();
+        for (var i = 0; i < count; i++)
+        {
+            array.Add(item?.DeepClone());
+        }
+        return array;
     }
 
     private static string GetStringSample(IOpenApiSchema schema)
@@ -282,17 +295,32 @@ internal static class OpenApiSchemaSampleGenerator
 
     private static decimal GetNumber(IOpenApiSchema schema, bool isInteger)
     {
-        // use 0 unless it's outside the allowed range
+        var multipleOf = schema.MultipleOf > 0 ? schema.MultipleOf : null;
+
+        // use 0 unless it's outside the allowed range. 0 is a multiple of any number
         if (TryParseBound(schema.Minimum?.ToString(), out var minimum) && minimum > 0)
         {
-            return isInteger ? decimal.Ceiling(minimum) : minimum;
+            var value = isInteger ? decimal.Ceiling(minimum) : minimum;
+            return multipleOf is decimal step ? RoundUpToMultiple(value, step, isInteger) : value;
         }
         if (TryParseBound(schema.Maximum?.ToString(), out var maximum) && maximum < 0)
         {
-            return isInteger ? decimal.Floor(maximum) : maximum;
+            var value = isInteger ? decimal.Floor(maximum) : maximum;
+            return multipleOf is decimal step ? -RoundUpToMultiple(-value, step, isInteger) : value;
         }
 
         return 0;
+    }
+
+    private static decimal RoundUpToMultiple(decimal value, decimal step, bool isInteger)
+    {
+        var multiple = decimal.Ceiling(value / step) * step;
+        // for integers with a fractional step, eg. 0.5, find a multiple that's also an integer
+        while (isInteger && multiple != decimal.Truncate(multiple))
+        {
+            multiple += step;
+        }
+        return multiple;
     }
 
     private static bool TryParseBound(string? bound, out decimal value) =>
@@ -442,6 +470,34 @@ internal static class OpenApiSchemaSampleGenerator
                 }
             }
             description["properties"] = properties;
+        }
+        if (schema.MinLength is int minLength)
+        {
+            description["minLength"] = minLength;
+        }
+        if (schema.MaxLength is int maxLength)
+        {
+            description["maxLength"] = maxLength;
+        }
+        if (!string.IsNullOrEmpty(schema.Pattern))
+        {
+            description["pattern"] = schema.Pattern;
+        }
+        if (schema.MultipleOf is not null)
+        {
+            description["multipleOf"] = schema.MultipleOf.Value;
+        }
+        if (schema.MinItems is int minItems)
+        {
+            description["minItems"] = minItems;
+        }
+        if (schema.MaxItems is int maxItems)
+        {
+            description["maxItems"] = maxItems;
+        }
+        if (schema.UniqueItems == true)
+        {
+            description["uniqueItems"] = true;
         }
         if (schema.Required is { Count: > 0 })
         {

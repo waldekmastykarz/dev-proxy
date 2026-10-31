@@ -279,12 +279,25 @@ public sealed class OpenApiMockResponsePlugin(
         return (contentType, media.Value);
     }
 
-    // JSON and text bodies can be generated from the schema. For other media
-    // types, eg. XML, only string examples from the spec can be used as-is
-    private static bool CanGenerateBody(string contentType, IOpenApiMediaType mediaType) =>
-        IsJsonContentType(contentType) ||
-        contentType.StartsWith("text/", StringComparison.OrdinalIgnoreCase) ||
-        GetExample(mediaType) is JsonValue example && example.GetValueKind() == JsonValueKind.String;
+    // JSON bodies can be generated from any schema. Text bodies only from
+    // string schemas. For other media types, eg. XML, and text with non-string
+    // schemas, only string examples from the spec can be used as-is
+    private static bool CanGenerateBody(string contentType, IOpenApiMediaType mediaType)
+    {
+        if (IsJsonContentType(contentType))
+        {
+            return true;
+        }
+
+        var example = GetExample(mediaType);
+        if (example is not null)
+        {
+            return example is JsonValue value && value.GetValueKind() == JsonValueKind.String;
+        }
+
+        return contentType.StartsWith("text/", StringComparison.OrdinalIgnoreCase) &&
+            OpenApiSchemaSampleGenerator.IsStringSchema(mediaType.Schema);
+    }
 
     private static bool IsJsonContentType(string contentType) =>
         contentType.Contains("json", StringComparison.OrdinalIgnoreCase) ||
