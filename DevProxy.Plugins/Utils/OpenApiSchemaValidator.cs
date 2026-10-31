@@ -15,7 +15,9 @@ internal enum SchemaValidationDirection
     Response
 }
 
-internal sealed record SchemaValidationError(string Path, string Message);
+/// <param name="UndefinedProperty">Name of the property when the error is
+/// about a property that isn't allowed by the schema.</param>
+internal sealed record SchemaValidationError(string Path, string Message, string? UndefinedProperty = null);
 
 /// <summary>
 /// Lightweight validator of JSON values against OpenAPI schemas
@@ -198,6 +200,10 @@ internal static class OpenApiSchemaValidator
     private static IOpenApiSchema ResolveTarget(IOpenApiSchema schema) =>
         schema is OpenApiSchemaReference reference ? (IOpenApiSchema?)reference.Target ?? schema : schema;
 
+    private static bool IsDeclaredInSibling(IList<IOpenApiSchema> allOf, int index, string propertyName) =>
+        allOf.Where((_, i) => i != index)
+            .Any(s => GetPropertyNames(s).Contains(propertyName, StringComparer.Ordinal));
+
     private static IEnumerable<IOpenApiSchema> GetComposedSchemas(IOpenApiSchema schema) =>
         (schema.AllOf ?? []).Concat(schema.AnyOf ?? []).Concat(schema.OneOf ?? []);
 
@@ -280,10 +286,24 @@ internal static class OpenApiSchemaValidator
 
         if (schema.AllOf is { Count: > 0 })
         {
-            foreach (var subSchema in schema.AllOf)
+            for (var i = 0; i < schema.AllOf.Count; i++)
             {
-                foreach (var error in ValidateComposed(value, subSchema, direction, path, state, depth + 1))
+                foreach (var subError in ValidateComposed(value, schema.AllOf[i], direction, path, state, depth + 1))
                 {
+                    var error = subError;
+                    if (error.UndefinedProperty is not null &&
+                        error.Path == GetPropertyPath(path, error.UndefinedProperty) &&
+                        IsDeclaredInSibling(schema.AllOf, i, error.UndefinedProperty))
+                    {
+                        // additionalProperties: false applies to each subschema on its own,
+                        // which is spec-compliant but often unexpected
+                        error = error with
+                        {
+                            Message = $"{error.Message}. The property is declared in a sibling allOf schema; additionalProperties: false applies per subschema",
+                            UndefinedProperty = null
+                        };
+                    }
+
                     // subschemas can report the same error, e.g. when they reference the same schema
                     if (!errors.Contains(error))
                     {
@@ -435,7 +455,7 @@ internal static class OpenApiSchemaValidator
             }
             else if (!schema.AdditionalPropertiesAllowed)
             {
-                errors.Add(new(propertyPath, $"Property '{property.Name}' isn't defined in the schema"));
+                errors.Add(new(propertyPath, $"Property '{property.Name}' isn't defined in the schema", property.Name));
             }
         }
     }

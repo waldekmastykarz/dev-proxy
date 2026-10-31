@@ -695,6 +695,64 @@ public sealed class OpenApiValidationPluginTests : IDisposable
     }
 
     [Fact]
+    public async Task HintsWhenAllOfBranchRejectsPropertyDeclaredInSibling()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("allof.yaml", """
+            openapi: 3.0.3
+            info: { title: AllOf, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                get:
+                  responses:
+                    '200':
+                      description: ok
+                      content:
+                        application/json:
+                          schema:
+                            allOf:
+                              - { type: object, properties: { id: { type: integer } }, additionalProperties: false }
+                              - { type: object, properties: { name: { type: string } } }
+            """));
+
+        var result = plugin.Validate(TestExchange.Request("GET", "https://api.fabrikam.com/items")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: """{"id":1,"name":"Alex","other":true}""").Session);
+
+        var messages = Messages(result);
+        Assert.Equal(2, messages.Length);
+        Assert.Contains("$.name: Property 'name' isn't defined in the schema. The property is declared in a sibling allOf schema; additionalProperties: false applies per subschema", messages);
+        Assert.Contains("$.other: Property 'other' isn't defined in the schema", messages);
+    }
+
+    [Fact]
+    public async Task SkipsValidatingLargeBodies()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("large.yaml", """
+            openapi: 3.0.3
+            info: { title: Large, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                get:
+                  responses:
+                    '200': { description: ok, content: { application/json: { schema: { type: integer } } } }
+            """));
+
+        var large = TestExchange.Request("GET", "https://api.fabrikam.com/items")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")],
+                body: $"\"{new string('a', 5 * 1024 * 1024)}\"").Session;
+        var small = TestExchange.Request("GET", "https://api.fabrikam.com/items")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: "\"a\"").Session;
+
+        Assert.Empty(plugin.Validate(large)!.Issues);
+        Assert.Contains("exceeds the maximum of 5,242,880 bytes", Assert.Single(plugin.GetNotes(large)), StringComparison.Ordinal);
+        Assert.Contains("Expected integer", Assert.Single(Messages(plugin.Validate(small))), StringComparison.Ordinal);
+        Assert.Empty(plugin.GetNotes(small));
+    }
+
+    [Fact]
     public async Task ReportsSchemasExceedingMaxDepth()
     {
         var schemas = string.Join(",\n", Enumerable.Range(0, 70).Select(i =>

@@ -41,6 +41,8 @@ public sealed class OpenApiValidationPlugin(
     // headers that OpenAPI says to ignore when defined as header parameters
     private static readonly string[] _ignoredHeaderParameters = ["Accept", "Content-Type", "Authorization"];
 
+    private const int MaxBodySize = 5 * 1024 * 1024;
+
     private readonly ConditionalWeakTable<IProxySession, ValidationOutcome> _outcomes = [];
     private List<LoadedSpec> _specs = [];
 
@@ -115,6 +117,10 @@ public sealed class OpenApiValidationPlugin(
         }
 
         var outcome = GetOrValidate(e.ProxySession);
+        foreach (var note in outcome.Notes)
+        {
+            Logger.LogRequest(note, MessageType.Normal, loggingContext);
+        }
         if (outcome.Result is null)
         {
             Logger.LogRequest("No matching OpenAPI spec", MessageType.Skipped, loggingContext);
@@ -204,10 +210,16 @@ public sealed class OpenApiValidationPlugin(
 
     internal OpenApiValidationResult? Validate(IProxySession session) => GetOrValidate(session).Result;
 
-    private ValidationOutcome GetOrValidate(IProxySession session) =>
-        _outcomes.GetValue(session, s => new ValidationOutcome(ValidateSession(s)));
+    internal IReadOnlyList<string> GetNotes(IProxySession session) => GetOrValidate(session).Notes;
 
-    private OpenApiValidationResult? ValidateSession(IProxySession session)
+    private ValidationOutcome GetOrValidate(IProxySession session) =>
+        _outcomes.GetValue(session, s =>
+        {
+            var notes = new List<string>();
+            return new ValidationOutcome(ValidateSession(s, notes), notes);
+        });
+
+    private OpenApiValidationResult? ValidateSession(IProxySession session, List<string> notes)
     {
         var request = session.Request;
         var response = session.Response;
@@ -256,10 +268,10 @@ public sealed class OpenApiValidationPlugin(
         }
 
         ValidateParameters(request, match, issues);
-        ValidateRequestBody(request, match.Operation, issues);
+        ValidateRequestBody(request, match.Operation, issues, notes);
         if (response is not null)
         {
-            ValidateResponse(response, match.Operation, issues);
+            ValidateResponse(response, match.Operation, issues, notes);
         }
 
         return new()
@@ -503,7 +515,7 @@ public sealed class OpenApiValidationPlugin(
         }
     }
 
-    private static void ValidateRequestBody(IHttpRequest request, OpenApiOperation operation, List<OpenApiValidationIssue> issues)
+    private static void ValidateRequestBody(IHttpRequest request, OpenApiOperation operation, List<OpenApiValidationIssue> issues, List<string> notes)
     {
         var requestBody = operation.RequestBody;
         var hasBody = request.Body.Length > 0;
@@ -531,10 +543,10 @@ public sealed class OpenApiValidationPlugin(
             return;
         }
 
-        ValidateBody(request, requestBody.Content, OpenApiValidationIssueLocation.Request, issues);
+        ValidateBody(request, requestBody.Content, OpenApiValidationIssueLocation.Request, issues, notes);
     }
 
-    private static void ValidateResponse(IHttpResponse response, OpenApiOperation operation, List<OpenApiValidationIssue> issues)
+    private static void ValidateResponse(IHttpResponse response, OpenApiOperation operation, List<OpenApiValidationIssue> issues, List<string> notes)
     {
         var statusCode = ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture);
         var responses = operation.Responses;
@@ -599,11 +611,11 @@ public sealed class OpenApiValidationPlugin(
             return;
         }
 
-        ValidateBody(response, specResponse.Content, OpenApiValidationIssueLocation.Response, issues);
+        ValidateBody(response, specResponse.Content, OpenApiValidationIssueLocation.Response, issues, notes);
     }
 
     private static void ValidateBody(IHttpMessage message, IDictionary<string, IOpenApiMediaType>? content,
-        OpenApiValidationIssueLocation location, List<OpenApiValidationIssue> issues)
+        OpenApiValidationIssueLocation location, List<OpenApiValidationIssue> issues, List<string> notes)
     {
         if (content is not { Count: > 0 })
         {
@@ -635,6 +647,15 @@ public sealed class OpenApiValidationPlugin(
 
         if (!IsJsonMediaType(contentType))
         {
+            return;
+        }
+
+        // validation runs inline while processing the response, so skip
+        // large bodies to avoid stalling the proxy
+        if (message.Body.Length > MaxBodySize)
+        {
+            notes.Add(string.Create(CultureInfo.InvariantCulture,
+                $"Skipped validating the {locationName} body because it's {message.Body.Length:N0} bytes, which exceeds the maximum of {MaxBodySize:N0} bytes"));
             return;
         }
 
@@ -935,5 +956,5 @@ public sealed class OpenApiValidationPlugin(
         OpenApiOperation? Operation,
         Dictionary<string, string> PathValues);
 
-    private sealed record ValidationOutcome(OpenApiValidationResult? Result);
+    private sealed record ValidationOutcome(OpenApiValidationResult? Result, IReadOnlyList<string> Notes);
 }
