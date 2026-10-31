@@ -4,6 +4,7 @@
 
 using System.Net;
 using System.Text.Json.Nodes;
+using DevProxy.Abstractions.LanguageModel;
 using DevProxy.Plugins.Mocking;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.OpenApi;
@@ -90,6 +91,8 @@ public sealed class OpenApiMockResponsePluginTests
     [InlineData("{ type: array, items: { type: integer } }", 1)]
     [InlineData("{ type: array, minItems: 5, maxItems: 2, items: { type: integer } }", 2)]
     [InlineData("{ type: array, maxItems: 0, items: { type: integer } }", 0)]
+    [InlineData("{ allOf: [ { type: array, minItems: 3, items: { type: integer } } ] }", 3)]
+    [InlineData("{ allOf: [ { type: array, minItems: 5, items: { type: integer } }, { maxItems: 2 } ] }", 2)]
     public void GenerateSample_HonorsMinItems(string schema, int expectedCount)
     {
         var sample = OpenApiSchemaSampleGenerator.GenerateSample(ParseSchema(schema));
@@ -104,11 +107,94 @@ public sealed class OpenApiMockResponsePluginTests
     [InlineData("{ type: integer, minimum: 1, multipleOf: 0.5 }", "1")]
     [InlineData("{ type: integer, minimum: 1.2, multipleOf: 1.5 }", "3")]
     [InlineData("{ type: integer, multipleOf: 3 }", "0")]
+    [InlineData("{ type: integer, minimum: 1.2, multipleOf: 0.0000000013 }", "13")]
+    [InlineData("{ allOf: [ { type: integer, minimum: 7, multipleOf: 5 } ] }", "10")]
+    [InlineData("{ allOf: [ { type: integer, multipleOf: 4 }, { minimum: 1, multipleOf: 6 } ] }", "12")]
     public void GenerateSample_HonorsMultipleOf(string schema, string expected)
     {
         var sample = OpenApiSchemaSampleGenerator.GenerateSample(ParseSchema(schema));
 
         Assert.Equal(decimal.Parse(expected, System.Globalization.CultureInfo.InvariantCulture), sample!.GetValue<decimal>());
+    }
+
+    [Theory]
+    [InlineData("{ type: array, minItems: 3, uniqueItems: true, items: { type: integer } }", "[0,1,2]")]
+    [InlineData("{ type: array, minItems: 3, uniqueItems: true, items: { type: integer, maximum: -10, multipleOf: 5 } }", "[-10,-15,-20]")]
+    [InlineData("{ type: array, minItems: 2, uniqueItems: true, items: { type: string, maxLength: 6 } }", "[\"string\",\"strin1\"]")]
+    [InlineData("{ type: array, minItems: 2, uniqueItems: true, items: { type: string, format: email } }", "[\"user@example.com\",\"user1@example.com\"]")]
+    [InlineData("{ type: array, minItems: 3, uniqueItems: true, items: { type: boolean } }", "[true,false]")]
+    [InlineData("{ type: array, minItems: 3, uniqueItems: true, items: { type: string, enum: [a, b] } }", "[\"a\",\"b\"]")]
+    [InlineData("{ type: array, minItems: 3, uniqueItems: true, items: { type: string, format: date } }", "[\"2024-01-01\"]")]
+    [InlineData("{ type: array, minItems: 2, uniqueItems: true, items: { type: object, properties: { id: { type: integer }, name: { type: string } } } }", "[{\"id\":0,\"name\":\"string\"},{\"id\":1,\"name\":\"string\"}]")]
+    [InlineData("{ type: array, minItems: 2, items: { type: integer } }", "[0,0]")]
+    public void GenerateSample_HonorsUniqueItems(string schema, string expected)
+    {
+        var sample = OpenApiSchemaSampleGenerator.GenerateSample(ParseSchema(schema));
+
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(expected), sample), sample?.ToJsonString());
+    }
+
+    [Fact]
+    public async Task LanguageModelResponse_IsUsedAndCached()
+    {
+        var client = new FakeLanguageModelClient("```json\n{ \"name\": \"Megan Bowen\" }\n```");
+
+        var results = await GetAsync("/lm", """
+            content:
+              application/json:
+                schema: { type: object, properties: { name: { type: string } } }
+            """, client, requestCount: 2);
+
+        Assert.All(results, r => Assert.Equal("Megan Bowen", JsonNode.Parse(r.Body)!["name"]!.GetValue<string>()));
+        Assert.Equal(1, client.CompletionCount);
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("[1, 2]")]
+    [InlineData(null)]
+    public async Task InvalidLanguageModelResponse_FallsBackToSchema(string? response)
+    {
+        var client = new FakeLanguageModelClient(response);
+
+        var results = await GetAsync("/lm-invalid", """
+            content:
+              application/json:
+                schema: { type: object, properties: { name: { type: string } } }
+            """, client);
+
+        Assert.Equal("string", JsonNode.Parse(results[0].Body)!["name"]!.GetValue<string>());
+        Assert.False(results[0].OriginReceived);
+    }
+
+    [Fact]
+    public async Task LanguageModelScalarWrapper_IsUnwrapped()
+    {
+        var client = new FakeLanguageModelClient("{ \"count\": 42 }");
+
+        var results = await GetAsync("/lm-count", """
+            content:
+              application/json:
+                schema: { type: integer }
+            """, client);
+
+        Assert.Equal("42", results[0].Body);
+    }
+
+    [Fact]
+    public async Task ResponseWithExample_DoesNotCallLanguageModel()
+    {
+        var client = new FakeLanguageModelClient("{ \"name\": \"Megan Bowen\" }");
+
+        var results = await GetAsync("/example", """
+            content:
+              application/json:
+                schema: { type: object, properties: { name: { type: string } } }
+                example: { name: Adele Vance }
+            """, client);
+
+        Assert.Equal("Adele Vance", JsonNode.Parse(results[0].Body)!["name"]!.GetValue<string>());
+        Assert.Equal(0, client.CompletionCount);
     }
 
     [Fact]
@@ -152,7 +238,11 @@ public sealed class OpenApiMockResponsePluginTests
     private static IEnumerable<string> Indent(string yaml, int spaces) =>
         yaml.Split('\n').Select(l => new string(' ', spaces) + l.TrimEnd('\r'));
 
-    private static async Task<(HttpStatusCode Status, string Body, bool OriginReceived)> GetAsync(string path, string responseYaml)
+    private static async Task<(HttpStatusCode Status, string Body, bool OriginReceived)> GetAsync(string path, string responseYaml) =>
+        (await GetAsync(path, responseYaml, new DisabledLanguageModelClient()))[0];
+
+    private static async Task<List<(HttpStatusCode Status, string Body, bool OriginReceived)>> GetAsync(
+        string path, string responseYaml, ILanguageModelClient languageModelClient, int requestCount = 1)
     {
         await using var origin = await FakeOrigin.StartAsync();
 
@@ -184,7 +274,7 @@ public sealed class OpenApiMockResponsePluginTests
                 TestDefaults.HttpClient,
                 NullLogger<OpenApiMockResponsePlugin>.Instance,
                 KestrelProxyHarness.BuildUrlsToWatch(origin.Host),
-                new DisabledLanguageModelClient(),
+                languageModelClient,
                 proxyConfig,
                 config);
 
@@ -194,14 +284,50 @@ public sealed class OpenApiMockResponsePluginTests
             await using var proxy = await KestrelProxyHarness.StartAsync(origin.Host, [plugin]);
             using var client = proxy.CreateHttpClient();
 
-            using var httpResponse = await client.GetAsync(new Uri($"http://{origin.Host}{path}"));
-            var body = await httpResponse.Content.ReadAsStringAsync();
-
-            return (httpResponse.StatusCode, body, origin.ReceivedRequests.Any(r => r.PathAndQuery == path));
+            var results = new List<(HttpStatusCode, string, bool)>();
+            for (var i = 0; i < requestCount; i++)
+            {
+                using var httpResponse = await client.GetAsync(new Uri($"http://{origin.Host}{path}"));
+                var body = await httpResponse.Content.ReadAsStringAsync();
+                results.Add((httpResponse.StatusCode, body, origin.ReceivedRequests.Any(r => r.PathAndQuery == path)));
+            }
+            return results;
         }
         finally
         {
             dir.Delete(recursive: true);
         }
+    }
+
+    private sealed class FakeLanguageModelClient(string? response) : ILanguageModelClient
+    {
+        private int _completionCount;
+
+        public int CompletionCount => _completionCount;
+
+        public Task<ILanguageModelCompletionResponse?> GenerateChatCompletionAsync(
+            string promptFileName, Dictionary<string, object> parameters, CancellationToken cancellationToken)
+        {
+            _ = Interlocked.Increment(ref _completionCount);
+            return Task.FromResult<ILanguageModelCompletionResponse?>(new FakeCompletionResponse(response));
+        }
+
+        public Task<ILanguageModelCompletionResponse?> GenerateChatCompletionAsync(
+            IEnumerable<ILanguageModelChatCompletionMessage> messages, CompletionOptions? options, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<ILanguageModelCompletionResponse?> GenerateCompletionAsync(
+            string prompt, CompletionOptions? options, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<bool> IsEnabledAsync(CancellationToken cancellationToken) => Task.FromResult(true);
+    }
+
+    private sealed class FakeCompletionResponse(string? response) : ILanguageModelCompletionResponse
+    {
+        public string? ErrorMessage => null;
+        public string? Response => response;
+        public string? RequestUrl { get; set; }
+        public OpenAIResponse ConvertToOpenAIResponse() => throw new NotSupportedException();
     }
 }

@@ -4,6 +4,7 @@
 
 using Microsoft.OpenApi;
 using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace DevProxy.Plugins.Mocking;
@@ -210,6 +211,23 @@ internal static class OpenApiSchemaSampleGenerator
             {
                 combined.MaxLength = maxLength;
             }
+            if (schema.MinItems is int minItems && (combined.MinItems is null || minItems > combined.MinItems))
+            {
+                combined.MinItems = minItems;
+            }
+            if (schema.MaxItems is int maxItems && (combined.MaxItems is null || maxItems < combined.MaxItems))
+            {
+                combined.MaxItems = maxItems;
+            }
+            if (schema.UniqueItems == true)
+            {
+                combined.UniqueItems = true;
+            }
+            combined.Pattern ??= schema.Pattern;
+            if (schema.MultipleOf is decimal multipleOf && multipleOf > 0)
+            {
+                combined.MultipleOf = combined.MultipleOf is decimal current ? LeastCommonMultiple(current, multipleOf) : multipleOf;
+            }
         }
 
         combined.Minimum = minimum?.ToString(CultureInfo.InvariantCulture);
@@ -255,11 +273,143 @@ internal static class OpenApiSchemaSampleGenerator
         }
 
         var array = new JsonArray();
-        for (var i = 0; i < count; i++)
+        if (schema.UniqueItems != true)
         {
-            array.Add(item?.DeepClone());
+            for (var i = 0; i < count; i++)
+            {
+                array.Add(item?.DeepClone());
+            }
+            return array;
+        }
+
+        // best-effort: vary the sample to get distinct items. If we can't,
+        // return fewer items rather than duplicates
+        array.Add(item?.DeepClone());
+        for (var attempt = 1; array.Count < count && attempt < count * 4; attempt++)
+        {
+            var variant = CreateVariant(item, schema.Items, attempt, depth);
+            if (variant is not null && !array.Any(i => JsonNode.DeepEquals(i, variant)))
+            {
+                array.Add(variant);
+            }
         }
         return array;
+    }
+
+    private static JsonNode? CreateVariant(JsonNode? sample, IOpenApiSchema? schema, int index, int depth)
+    {
+        if (schema is null || sample is null || depth > MaxDepth)
+        {
+            return null;
+        }
+
+        var constraints = schema.AllOf is { Count: > 0 } ? CombineConstraints(FlattenAllOf(schema, depth)) : schema;
+        var enumValues = constraints.Enum?.Where(e => e is not null).ToArray();
+        if (enumValues is { Length: > 0 })
+        {
+            return index < enumValues.Length ? enumValues[index]!.DeepClone() : null;
+        }
+
+        if (sample is JsonObject obj)
+        {
+            foreach (var (name, value) in obj)
+            {
+                if (value is not JsonValue || FindPropertySchema(schema, name, depth) is not IOpenApiSchema propertySchema)
+                {
+                    continue;
+                }
+
+                var variant = CreateVariant(value, propertySchema, index, depth + 1);
+                if (variant is not null)
+                {
+                    var clone = obj.DeepClone().AsObject();
+                    clone[name] = variant;
+                    return clone;
+                }
+            }
+            return null;
+        }
+
+        if (sample is not JsonValue scalar)
+        {
+            return null;
+        }
+
+        switch (scalar.GetValueKind())
+        {
+            case JsonValueKind.Number when scalar.TryGetValue<decimal>(out var number):
+                return CreateNumberVariant(number, constraints, index);
+            case JsonValueKind.True or JsonValueKind.False when index == 1:
+                return JsonValue.Create(scalar.GetValueKind() == JsonValueKind.False);
+            case JsonValueKind.String when scalar.TryGetValue<string>(out var text):
+                return CreateStringVariant(text, constraints, index) is string variant ? JsonValue.Create(variant) : null;
+            default:
+                return null;
+        }
+    }
+
+    private static JsonValue? CreateNumberVariant(decimal number, IOpenApiSchema schema, int index)
+    {
+        try
+        {
+            var isInteger = GetEffectiveType(schema) == JsonSchemaType.Integer;
+            var step = schema.MultipleOf > 0 ? schema.MultipleOf.Value : 1m;
+            if (isInteger)
+            {
+                step = GetIntegerStep(step);
+            }
+
+            var hasMinimum = TryParseBound(schema.Minimum?.ToString(), out var minimum);
+            var hasMaximum = TryParseBound(schema.Maximum?.ToString(), out var maximum);
+
+            var up = number + (index * step);
+            if (!hasMaximum || up <= maximum)
+            {
+                return JsonValue.Create(up);
+            }
+            var down = number - (index * step);
+            return !hasMinimum || down >= minimum ? JsonValue.Create(down) : null;
+        }
+        catch (OverflowException)
+        {
+            return null;
+        }
+    }
+
+    private static string? CreateStringVariant(string text, IOpenApiSchema schema, int index)
+    {
+        var suffix = index.ToString(CultureInfo.InvariantCulture);
+        switch (schema.Format?.ToLowerInvariant())
+        {
+            case "uuid" when text.Length > 0:
+                return text[..^1] + (index % 16).ToString("x", CultureInfo.InvariantCulture);
+            case "email" or "idn-email" when text.Contains('@', StringComparison.Ordinal):
+                var at = text.IndexOf('@', StringComparison.Ordinal);
+                return text[..at] + suffix + text[at..];
+            case null or "":
+                if (schema.MaxLength is int maxLength && text.Length + suffix.Length > maxLength)
+                {
+                    return maxLength >= suffix.Length ? text[..(maxLength - suffix.Length)] + suffix : null;
+                }
+                return text + suffix;
+            default:
+                // other formats, like dates, can't be varied safely
+                return null;
+        }
+    }
+
+    private static IOpenApiSchema? FindPropertySchema(IOpenApiSchema schema, string name, int depth)
+    {
+        foreach (var candidate in FlattenAllOf(schema, depth))
+        {
+            if (candidate.Properties?.TryGetValue(name, out var propertySchema) == true)
+            {
+                return propertySchema;
+            }
+        }
+
+        var alternative = schema.OneOf?.FirstOrDefault() ?? schema.AnyOf?.FirstOrDefault();
+        return alternative is not null && depth <= MaxDepth ? FindPropertySchema(alternative, name, depth + 1) : null;
     }
 
     private static string GetStringSample(IOpenApiSchema schema)
@@ -314,13 +464,63 @@ internal static class OpenApiSchemaSampleGenerator
 
     private static decimal RoundUpToMultiple(decimal value, decimal step, bool isInteger)
     {
-        var multiple = decimal.Ceiling(value / step) * step;
-        // for integers with a fractional step, eg. 0.5, find a multiple that's also an integer
-        while (isInteger && multiple != decimal.Truncate(multiple))
+        try
         {
-            multiple += step;
+            if (isInteger)
+            {
+                step = GetIntegerStep(step);
+            }
+            return decimal.Ceiling(value / step) * step;
         }
-        return multiple;
+        catch (OverflowException)
+        {
+            return value;
+        }
+    }
+
+    // the smallest integer that's a multiple of step. For step p/q in lowest
+    // terms, that's p, eg. 1.5 = 3/2 -> 3
+    private static decimal GetIntegerStep(decimal step)
+    {
+        var denominator = Pow10(step.Scale);
+        var numerator = step * denominator;
+        return numerator / GreatestCommonDivisor(numerator, denominator);
+    }
+
+    private static decimal LeastCommonMultiple(decimal a, decimal b)
+    {
+        try
+        {
+            var scale = Pow10(Math.Max(a.Scale, b.Scale));
+            var scaledA = a * scale;
+            var scaledB = b * scale;
+            return scaledA / GreatestCommonDivisor(scaledA, scaledB) * scaledB / scale;
+        }
+        catch (OverflowException)
+        {
+            return Math.Max(a, b);
+        }
+    }
+
+    private static decimal GreatestCommonDivisor(decimal a, decimal b)
+    {
+        a = decimal.Truncate(a);
+        b = decimal.Truncate(b);
+        while (b != 0)
+        {
+            (a, b) = (b, a % b);
+        }
+        return a;
+    }
+
+    private static decimal Pow10(int exponent)
+    {
+        var result = 1m;
+        for (var i = 0; i < exponent; i++)
+        {
+            result *= 10;
+        }
+        return result;
     }
 
     private static bool TryParseBound(string? bound, out decimal value) =>
