@@ -22,6 +22,9 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
     ILogger<GraphMissingPermissionsGuidancePlugin> logger,
     ISet<UrlToWatch> urlsToWatch) : BasePlugin(logger, urlsToWatch)
 {
+    private static readonly HashSet<string> SharedDataResources = new(
+        ["messages", "mailFolders", "events", "calendar", "calendars", "calendarView", "calendarGroups", "contacts", "contactFolders"],
+        StringComparer.OrdinalIgnoreCase);
     private const string ConsumersTenantId = "9188040d-6c67-4c5b-b112-36a304b66dad";
     private static readonly TimeSpan PermissionsLookupTimeout = TimeSpan.FromSeconds(3);
     private static readonly HashSet<string> SelfOnlyDelegatedPermissions = new(["User.Read", "User.ReadWrite"], StringComparer.OrdinalIgnoreCase);
@@ -192,10 +195,10 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
             tokenizedUrl.StartsWith("/users/", StringComparison.OrdinalIgnoreCase) &&
             !IsSignedInUser(absoluteUrl, userIdentifiers);
 
-        // delegated permissions for another user's resources, like their
-        // mailbox, only work if that data is accessible to the signed-in user
-        var otherUserDataNote = mayTargetOtherUser && tokenizedUrl.Count(c => c == '/') > 2
-            ? " If the request accesses another user's data, keep in mind that delegated permissions only allow access to data that the signed-in user can access. To access another user's data, such as their mail or calendar, that user must share it with the signed-in user (and the app must use the corresponding .Shared permission where available), or the app must use application permissions."
+        // delegated mail, calendar and contacts permissions only cover another
+        // user's data if that user shared it with the signed-in user
+        var otherUserDataNote = mayTargetOtherUser && IsSharedDataResource(tokenizedUrl)
+            ? " If the request accesses another user's mailbox, calendar, or contacts, delegated permissions only work if that user shared the data with the signed-in user (or delegated access to it), and the app uses the corresponding .Shared permission, such as Mail.Read.Shared or Calendars.Read.Shared. Alternatively, use application permissions."
             : string.Empty;
 
         // delegated self-only permissions, like User.Read, are listed for
@@ -358,6 +361,13 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
             Logger.LogDebug(ex, "Failed to parse batch request or response");
             return [];
         }
+    }
+
+    private static bool IsSharedDataResource(string tokenizedUrl)
+    {
+        // segments: "", "users", "{users-id}", "{resource}", ...
+        var segments = tokenizedUrl.Split('/');
+        return segments.Length > 3 && SharedDataResources.Contains(segments[3]);
     }
 
     private static bool IsSignedInUser(string absoluteUrl, string[] userIdentifiers)

@@ -385,7 +385,27 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
 
         var log = Assert.Single(factory.LogsOfType(MessageType.Failed));
         Assert.Contains("Mail.ReadBasic", log.Message, StringComparison.Ordinal);
-        Assert.Contains("that user must share it with the signed-in user", log.Message, StringComparison.Ordinal);
+        Assert.Contains("Mail.Read.Shared", log.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Forbidden_DelegatedOtherUserDirectoryData_OmitsSharingNote()
+    {
+        using var handler = new StubPermissionsHandler("""
+            [
+              { "value": "GroupMember.Read.All", "scopeType": "DelegatedWork", "isLeastPrivilege": true, "isHidden": false },
+              { "value": "Directory.Read.All", "scopeType": "DelegatedWork", "isLeastPrivilege": false, "isHidden": false }
+            ]
+            """);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/users/8e6b0bba-5bce-4b1b-9d5b-1f5e8b0d1a6c/memberOf", [("Authorization", BearerToken(scp: "User.Read", oid: "1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d"))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Failed));
+        Assert.DoesNotContain(".Shared", log.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -401,7 +421,7 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
         await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
 
         var log = Assert.Single(factory.LogsOfType(MessageType.Failed));
-        Assert.DoesNotContain("must share it", log.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(".Shared", log.Message, StringComparison.Ordinal);
     }
 
     [Fact]
