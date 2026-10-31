@@ -286,6 +286,8 @@ public sealed class GenerationAuthIntegrationTests
     [InlineData("access_token")]
     [InlineData("subscription-key")]
     [InlineData("sig")]
+    [InlineData("api-key")]
+    [InlineData("token")]
     public async Task OpenApiSpecGenerator_AuthQueryParameter_EmitsApiKeySchemeAndSkipsParameter(string name)
     {
         var doc = await GenerateOpenApiJsonAsync([Exchange($"https://api.contoso.com/users?{name}=secret-value&top=10")]);
@@ -454,13 +456,15 @@ public sealed class GenerationAuthIntegrationTests
         Assert.DoesNotContain("sts.windows.net", tsp, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task TypeSpecGenerator_AccessTokenQueryParameter_UsesApiKeyAuth()
+    [Theory]
+    [InlineData("access_token")]
+    [InlineData("token")]
+    public async Task TypeSpecGenerator_AuthQueryParameter_UsesApiKeyAuth(string name)
     {
-        var tsp = await GenerateTypeSpecAsync([Exchange("https://api.contoso.com/users?access_token=abc")]);
+        var tsp = await GenerateTypeSpecAsync([Exchange($"https://api.contoso.com/users?{name}=abc")]);
 
-        Assert.Contains("ApiKeyAuth<ApiKeyLocation.query, \"access_token\">", tsp, StringComparison.Ordinal);
-        Assert.DoesNotContain("@query access_token", tsp, StringComparison.Ordinal);
+        Assert.Contains($"ApiKeyAuth<ApiKeyLocation.query, \"{name}\">", tsp, StringComparison.Ordinal);
+        Assert.DoesNotContain($"@query {name}", tsp, StringComparison.Ordinal);
     }
 
     [Fact]

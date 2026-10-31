@@ -93,8 +93,13 @@ internal static class AuthDetector
 
         var query = HttpUtility.ParseQueryString(requestUri.Query);
         return query.AllKeys
-            .FirstOrDefault(k => k is not null && Models.Http.AuthQueryParameters.Contains(k.ToLowerInvariant()));
+            .FirstOrDefault(k => k is not null && IsAuthQueryParameter(k.ToLowerInvariant()));
     }
+
+    // auth header names are also commonly used to pass credentials in the query string
+    private static bool IsAuthQueryParameter(string lowerCaseName) =>
+        Models.Http.AuthQueryParameters.Contains(lowerCaseName) ||
+        Models.Http.AuthHeaders.Contains(lowerCaseName);
 
     private static DetectedAuth DetectAuthorizationAuth(string bearerToken, ILogger logger)
     {
