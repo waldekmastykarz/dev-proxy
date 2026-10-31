@@ -6,6 +6,7 @@ using System.Net;
 using DevProxy.Abstractions.Proxy;
 using DevProxy.Abstractions.Utils;
 using DevProxy.Plugins.Reporting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -150,7 +151,8 @@ public sealed class OpenApiValidationPluginTests : IDisposable
             GlobalData = new() { [ProxyUtils.ReportsKey] = new Dictionary<string, object>() },
         };
 
-    private async Task<OpenApiValidationPlugin> CreatePluginAsync(string configJson = """{ "specFiles": [ "contoso.json" ] }""")
+    private async Task<OpenApiValidationPlugin> CreatePluginAsync(string configJson = """{ "specFiles": [ "contoso.json" ] }""",
+        ILogger<OpenApiValidationPlugin>? logger = null)
     {
         await File.WriteAllTextAsync(Path.Combine(_dir.FullName, "contoso.json"), Spec);
 
@@ -160,7 +162,7 @@ public sealed class OpenApiValidationPluginTests : IDisposable
         };
         var plugin = new OpenApiValidationPlugin(
             TestDefaults.HttpClient,
-            NullLogger<OpenApiValidationPlugin>.Instance,
+            logger ?? NullLogger<OpenApiValidationPlugin>.Instance,
             KestrelProxyHarness.BuildUrlsToWatch("api.contoso.com"),
             proxyConfig,
             PluginConfig.FromJson(configJson));
@@ -1024,5 +1026,45 @@ public sealed class OpenApiValidationPluginTests : IDisposable
 
         Assert.Equal(count, result!.Issues.Count());
         Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"Validation took {stopwatch.Elapsed}");
+    }
+
+    [Fact]
+    public async Task WarnsAboutSpecErrors()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_dir.FullName, "broken.yaml"), """
+            openapi: 3.0.3
+            info: { title: Broken, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                get:
+                  parameters:
+                    - { name: id, in: nowhere, schema: { type: integer } }
+                  responses: { '204': { description: ok } }
+            """);
+        var logger = new WarningLogger();
+
+        var plugin = await CreatePluginAsync("""{ "specFiles": [ "broken.yaml" ] }""", logger);
+
+        Assert.NotNull(plugin.Validate(Call("GET", "https://api.fabrikam.com/items").Session));
+        Assert.Contains(logger.Warnings, w => w.Contains("broken.yaml' has errors", StringComparison.Ordinal));
+    }
+
+    private sealed class WarningLogger : ILogger<OpenApiValidationPlugin>
+    {
+        public List<string> Warnings { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
+            }
+        }
     }
 }

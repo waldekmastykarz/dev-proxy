@@ -837,6 +837,12 @@ public sealed class OpenApiValidationPlugin(
                 continue;
             }
 
+            if (diagnostics is not null)
+            {
+                // the spec was loaded, but parts of it might've been ignored
+                Logger.LogWarning("OpenAPI spec '{File}' has errors and might not be validated completely: {Diagnostics}", file, diagnostics);
+            }
+
             var servers = BuildServerScopes(document, file);
             if (servers.Count == 0)
             {
