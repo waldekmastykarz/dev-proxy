@@ -314,22 +314,51 @@ internal static class LinuxCertificateHelper
     private static void RemoveFromNssDatabase(ILogger logger)
     {
         var certutil = FindCertutil();
-        var nssDir = GetNssDatabaseDirectory();
-        if (certutil is null || !Directory.Exists(nssDir))
+        if (certutil is null)
         {
             return;
         }
 
-        if (Run(new(certutil, ["-D", "-d", $"sql:{nssDir}", "-n", NssNickname]), logger, redirectOutput: true, logFailure: false))
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        foreach (var nssDir in GetNssDatabaseDirectoriesForRemoval(home, Directory.Exists))
         {
-            logger.LogInformation("Certificate removed from the NSS database ({Path}).", nssDir);
+            if (Run(new(certutil, ["-D", "-d", $"sql:{nssDir}", "-n", NssNickname]), logger, redirectOutput: true, logFailure: false))
+            {
+                logger.LogInformation("Certificate removed from the NSS database ({Path}).", nssDir);
+            }
         }
     }
 
-    internal static void LogManualInstructions(ILogger logger)
+    /// <summary>
+    /// The active NSS database can change (e.g. ~/.pki/nssdb is created after the certificate was
+    /// added to ~/.local/share/pki/nssdb), so removal checks every database that exists.
+    /// </summary>
+    internal static IEnumerable<string> GetNssDatabaseDirectoriesForRemoval(string home, Func<string, bool> dirExists) =>
+        new[] { $"{home}/.pki/nssdb", $"{home}/.local/share/pki/nssdb" }.Where(dirExists);
+
+    /// <summary>
+    /// Writes the public root certificate to devproxy-ca.crt in the current directory so the user
+    /// can add it to their CA anchors, regardless of where the PFX is stored.
+    /// </summary>
+    internal static void WriteManualTrustInstructions(X509Certificate2 certificate, ILogger logger)
     {
+        const string help = "More information: https://aka.ms/devproxy/start";
+        var path = Path.GetFullPath(CertificateFileName);
+        try
+        {
+            File.WriteAllText(path, certificate.ExportCertificatePem() + "\n");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(
+                "Couldn't detect your distro's certificate store, so trust the Dev Proxy root certificate manually. Couldn't save it to {Path}: {Error}. {Help}",
+                path, ex.Message, help);
+            return;
+        }
+
         logger.LogWarning(
-            "Couldn't detect your distro's certificate store. Trust the Dev Proxy root certificate manually: export it with 'openssl pkcs12 -in ~/.config/dev-proxy/rootCert.pfx -clcerts -nokeys -out devproxy-ca.crt -passin pass:', add devproxy-ca.crt to your system's CA anchors and refresh the store. More information: https://aka.ms/devproxy/start");
+            "Couldn't detect your distro's certificate store. Saved the Dev Proxy root certificate to {Path}. Add it to your system's CA anchors and refresh the store. {Help}",
+            path, help);
     }
 
     private static (bool IsRoot, bool IsInteractive) GetContext() =>

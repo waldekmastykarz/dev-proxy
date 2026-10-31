@@ -170,6 +170,16 @@ public class LinuxCertificateHelperTests
     }
 
     [Fact]
+    public void GetNssDatabaseDirectoriesForRemoval_ReturnsEveryExistingDatabase()
+    {
+        Assert.Equal(["/home/u/.pki/nssdb", "/home/u/.local/share/pki/nssdb"],
+            LinuxCertificateHelper.GetNssDatabaseDirectoriesForRemoval("/home/u", Directories("/home/u/.pki/nssdb", "/home/u/.local/share/pki/nssdb")));
+        Assert.Equal(["/home/u/.local/share/pki/nssdb"],
+            LinuxCertificateHelper.GetNssDatabaseDirectoriesForRemoval("/home/u", Directories("/home/u/.local/share/pki/nssdb")));
+        Assert.Empty(LinuxCertificateHelper.GetNssDatabaseDirectoriesForRemoval("/home/u", Directories()));
+    }
+
+    [Fact]
     public void FindSystemExecutable_IgnoresPath()
     {
         var dir = Directory.CreateTempSubdirectory();

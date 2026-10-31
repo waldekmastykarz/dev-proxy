@@ -96,7 +96,7 @@ internal sealed class RootCertificateTrust(
             var store = LinuxCertificateHelper.DetectTrustStore();
             if (store is null)
             {
-                LinuxCertificateHelper.LogManualInstructions(logger);
+                LinuxCertificateHelper.WriteManualTrustInstructions(rootCertificate, logger);
                 return;
             }
             switch (LinuxCertificateHelper.TrustCertificate(rootCertificate, store, logger))
