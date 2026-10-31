@@ -196,6 +196,7 @@ internal sealed class ProxySession(
     private async Task ForwardStdinAsync()
     {
         var buffer = new byte[4096];
+        var framer = new StdioLineFramer();
         using var stdin = Console.OpenStandardInput();
 
         try
@@ -228,60 +229,19 @@ internal sealed class ProxySession(
                 var bytesRead = await readTask;
                 if (bytesRead == 0)
                 {
+                    // Process any trailing data that wasn't terminated by a newline
+                    var remainder = framer.Flush();
+                    if (remainder is not null)
+                    {
+                        await ProcessStdinMessageAsync(remainder);
+                    }
                     break;
                 }
 
-                var data = buffer[..bytesRead];
-                Log("STDIN >>>", buffer, bytesRead);
-
-                // Log intercepted stdin (similar to HTTP InterceptedRequest)
-                await LogInterceptedStdioAsync(data, StdioMessageDirection.Stdin);
-
-                // Execute plugins and check if message was consumed
-                var responseState = new ResponseState();
-                var requestArgs = new StdioRequestArgs
+                foreach (var message in framer.Append(buffer.AsSpan(0, bytesRead)))
                 {
-                    Body = data,
-                    ResponseState = responseState,
-                    Session = _stdioSession!,
-                    SessionData = _sessionData,
-                    GlobalData = _globalData
-                };
-
-                await ExecuteBeforeStdinPluginsAsync(requestArgs);
-
-                // Only forward to child if not consumed
-                if (!responseState.HasBeenSet)
-                {
-                    await _writeSemaphore.WaitAsync(_cts.Token);
-                    try
-                    {
-                        await _childStdin!.WriteAsync(buffer.AsMemory(0, bytesRead), _cts.Token);
-                        await _childStdin.FlushAsync(_cts.Token);
-                    }
-                    finally
-                    {
-                        _ = _writeSemaphore.Release();
-                    }
+                    await ProcessStdinMessageAsync(message);
                 }
-                else
-                {
-                    // Send mock response if set by a plugin
-                    await SendMockResponseAsync(requestArgs);
-                }
-
-                // Create request log entry for this stdin message
-                var requestLog = new StdioRequestLog
-                {
-                    Command = _stdioSession!.Command,
-                    StdinBody = data,
-                    StdinTimestamp = DateTimeOffset.UtcNow,
-                    MessageType = responseState.HasBeenSet ? MessageType.Mocked : MessageType.PassedThrough
-                };
-                _requestLogs.Add(requestLog);
-
-                // Notify plugins of the request log
-                await NotifyStdioRequestLogAsync(requestLog);
             }
         }
         catch (OperationCanceledException)
@@ -303,6 +263,60 @@ internal sealed class ProxySession(
                 // Ignore errors during cleanup
             }
         }
+    }
+
+    private async Task ProcessStdinMessageAsync(byte[] message)
+    {
+        Log("STDIN >>>", message, message.Length);
+
+        // Log intercepted stdin (similar to HTTP InterceptedRequest)
+        await LogInterceptedStdioAsync(message, StdioMessageDirection.Stdin);
+
+        // Execute plugins and check if message was consumed
+        var responseState = new ResponseState();
+        var requestArgs = new StdioRequestArgs
+        {
+            Body = message,
+            ResponseState = responseState,
+            Session = _stdioSession!,
+            SessionData = _sessionData,
+            GlobalData = _globalData
+        };
+
+        await ExecuteBeforeStdinPluginsAsync(requestArgs);
+
+        // Only forward to child if not consumed
+        if (!responseState.HasBeenSet)
+        {
+            await _writeSemaphore.WaitAsync(_cts.Token);
+            try
+            {
+                await _childStdin!.WriteAsync(message, _cts.Token);
+                await _childStdin.FlushAsync(_cts.Token);
+            }
+            finally
+            {
+                _ = _writeSemaphore.Release();
+            }
+        }
+        else
+        {
+            // Send mock response if set by a plugin
+            await SendMockResponseAsync(requestArgs);
+        }
+
+        // Create request log entry for this stdin message
+        var requestLog = new StdioRequestLog
+        {
+            Command = _stdioSession!.Command,
+            StdinBody = message,
+            StdinTimestamp = DateTimeOffset.UtcNow,
+            MessageType = responseState.HasBeenSet ? MessageType.Mocked : MessageType.PassedThrough
+        };
+        _requestLogs.Add(requestLog);
+
+        // Notify plugins of the request log
+        await NotifyStdioRequestLogAsync(requestLog);
     }
 
     private async Task ForwardStdoutAsync()
