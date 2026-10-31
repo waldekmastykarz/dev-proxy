@@ -313,18 +313,37 @@ internal static class LinuxCertificateHelper
 
     private static void RemoveFromNssDatabase(ILogger logger)
     {
-        var certutil = FindCertutil();
-        if (certutil is null)
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var nssDirs = GetNssDatabaseDirectoriesForRemoval(home, Directory.Exists).ToArray();
+        if (nssDirs.Length == 0)
         {
             return;
         }
 
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        foreach (var nssDir in GetNssDatabaseDirectoriesForRemoval(home, Directory.Exists))
+        var certutil = FindCertutil();
+        if (certutil is null)
         {
-            if (Run(new(certutil, ["-D", "-d", $"sql:{nssDir}", "-n", NssNickname]), logger, redirectOutput: true, logFailure: false))
+            logger.LogWarning(
+                "Couldn't find certutil to check the NSS database ({Paths}). If you added the Dev Proxy root certificate there, remove '{Nickname}' manually or install certutil and run 'devproxy cert remove' again.",
+                string.Join(", ", nssDirs), NssNickname);
+            return;
+        }
+
+        foreach (var nssDir in nssDirs)
+        {
+            var db = $"sql:{nssDir}";
+            // Only attempt (and report failures of) removal when the certificate is there.
+            if (!Run(new(certutil, ["-L", "-d", db, "-n", NssNickname]), logger, redirectOutput: true, logFailure: false))
+            {
+                continue;
+            }
+            if (Run(new(certutil, ["-D", "-d", db, "-n", NssNickname]), logger, redirectOutput: true))
             {
                 logger.LogInformation("Certificate removed from the NSS database ({Path}).", nssDir);
+            }
+            else
+            {
+                logger.LogError("Couldn't remove the Dev Proxy root certificate from the NSS database ({Path}). Remove '{Nickname}' manually.", nssDir, NssNickname);
             }
         }
     }
