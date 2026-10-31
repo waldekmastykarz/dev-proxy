@@ -228,6 +228,49 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
         _ = Assert.Single(factory.LogsOfType(MessageType.Failed));
     }
 
+    [Fact]
+    public async Task Batch_ConcurrentForbiddenRequestsWithSameKey_ShareSingleLookup()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson) { Delay = TimeSpan.FromMilliseconds(200) };
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var ids = new[] { "0b8a5d2e-1c3f-4e5a-9b7c-6d8e9f0a1b2c", "4f3e2d1c-0b9a-4876-a543-210fedcba987", "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d" };
+        var batchRequest = JsonSerializer.Serialize(new
+        {
+            requests = ids.Select((id, i) => new { id = $"{i + 1}", method = "GET", url = $"/me/messages/{id}" })
+        });
+        var batchResponse = JsonSerializer.Serialize(new
+        {
+            responses = ids.Select((_, i) => new { id = $"{i + 1}", status = 403, body = new { } })
+        });
+
+        var exchange = TestExchange
+            .Request("POST", "https://graph.microsoft.com/v1.0/$batch", [("Authorization", BearerToken(scp: "User.Read")), ("Content-Type", "application/json")], batchRequest)
+            .WithResponse(HttpStatusCode.OK, [("Content-Type", "application/json")], batchResponse);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        Assert.Equal(3, factory.LogsOfType(MessageType.Failed).Count);
+        _ = Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task FailedLookup_IsRetriedOnNextRequest()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson) { FailuresBeforeSuccess = 1 };
+        var (plugin, factory) = CreatePlugin(handler);
+
+        for (var i = 0; i < 2; i++)
+        {
+            var exchange = TestExchange
+                .Request("GET", "https://graph.microsoft.com/v1.0/me/messages", [("Authorization", BearerToken(scp: "User.Read"))])
+                .WithResponse(HttpStatusCode.Forbidden);
+            await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+        }
+
+        _ = Assert.Single(factory.LogsOfType(MessageType.Failed));
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
     private static (GraphMissingPermissionsGuidancePlugin Plugin, CapturingLoggerFactory Factory) CreatePlugin(HttpMessageHandler handler)
     {
         var factory = new CapturingLoggerFactory();
@@ -263,15 +306,42 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
 
     private sealed class StubPermissionsHandler(string? responseJson, HttpStatusCode statusCode = HttpStatusCode.OK) : HttpMessageHandler
     {
-        public List<Uri> Requests { get; } = [];
+        private readonly Lock _lock = new();
+        private readonly List<Uri> _requests = [];
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        public IReadOnlyList<Uri> Requests
         {
-            Requests.Add(request.RequestUri!);
-            return Task.FromResult(new HttpResponseMessage(statusCode)
+            get
+            {
+                lock (_lock)
+                {
+                    return [.. _requests];
+                }
+            }
+        }
+
+        public TimeSpan Delay { get; init; } = TimeSpan.Zero;
+
+        public int FailuresBeforeSuccess { get; init; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            int requestCount;
+            lock (_lock)
+            {
+                _requests.Add(request.RequestUri!);
+                requestCount = _requests.Count;
+            }
+
+            if (Delay > TimeSpan.Zero)
+            {
+                await Task.Delay(Delay, cancellationToken);
+            }
+
+            return new HttpResponseMessage(requestCount <= FailuresBeforeSuccess ? HttpStatusCode.InternalServerError : statusCode)
             {
                 Content = new StringContent(responseJson ?? "{}", Encoding.UTF8, "application/json")
-            });
+            };
         }
     }
 }

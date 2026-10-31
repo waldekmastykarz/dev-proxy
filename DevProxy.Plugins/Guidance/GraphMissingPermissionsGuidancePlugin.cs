@@ -27,6 +27,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
     private readonly HttpClient _httpClient = httpClient;
 #pragma warning restore CA2213
     private readonly ConcurrentDictionary<string, GraphPermissionInfo[]> _permissionsCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, Lazy<Task<GraphPermissionInfo[]?>>> _pendingLookups = new(StringComparer.OrdinalIgnoreCase);
 
     public override string Name => nameof(GraphMissingPermissionsGuidancePlugin);
 
@@ -214,12 +215,40 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
             return cachedPermissions;
         }
 
+        // coalesce concurrent lookups for the same key; the shared lookup isn't
+        // tied to any caller's cancellation token so that one cancelled caller
+        // doesn't fail the others
+        Lazy<Task<GraphPermissionInfo[]?>>? newLookup = null;
+        newLookup = new(LookupAsync);
+        var lookup = _pendingLookups.GetOrAdd(cacheKey, newLookup);
+        return await lookup.Value.WaitAsync(cancellationToken);
+
+        async Task<GraphPermissionInfo[]?> LookupAsync()
+        {
+            try
+            {
+                return await FetchPermissionsAsync(cacheKey, method, tokenizedUrl, scopeType);
+            }
+            finally
+            {
+                // successful results are in the cache; failed lookups are
+                // removed so that they can be retried
+                _ = _pendingLookups.TryRemove(new KeyValuePair<string, Lazy<Task<GraphPermissionInfo[]?>>>(cacheKey, newLookup!));
+            }
+        }
+    }
+
+    private async Task<GraphPermissionInfo[]?> FetchPermissionsAsync(
+        string cacheKey,
+        string method,
+        string tokenizedUrl,
+        string scopeType)
+    {
         var url = $"https://graph-devx-api.microsoft.com/permissions?scopeType={scopeType}&requesturl={Uri.EscapeDataString(tokenizedUrl)}&method={Uri.EscapeDataString(method.ToUpperInvariant())}";
 
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(PermissionsLookupTimeout);
+            using var cts = new CancellationTokenSource(PermissionsLookupTimeout);
 
             Logger.LogDebug("Retrieving permissions from {Url}", url);
             using var response = await _httpClient.GetAsync(new Uri(url), cts.Token);
@@ -241,7 +270,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
             _permissionsCache[cacheKey] = permissions;
             return permissions;
         }
-        catch (Exception ex) when ((ex is HttpRequestException or JsonException or OperationCanceledException) && !cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or OperationCanceledException)
         {
             Logger.LogDebug(ex, "Failed to retrieve permissions for {Method} {Url}", method, tokenizedUrl);
             return null;
