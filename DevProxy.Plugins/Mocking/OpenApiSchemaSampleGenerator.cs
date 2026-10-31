@@ -284,6 +284,10 @@ internal static class OpenApiSchemaSampleGenerator
 
         // best-effort: vary the sample to get distinct items. If we can't,
         // return fewer items rather than duplicates
+        if (count == 0)
+        {
+            return array;
+        }
         array.Add(item?.DeepClone());
         for (var attempt = 1; array.Count < count && attempt < count * 4; attempt++)
         {

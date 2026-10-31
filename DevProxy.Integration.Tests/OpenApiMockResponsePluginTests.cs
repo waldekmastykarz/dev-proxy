@@ -127,6 +127,7 @@ public sealed class OpenApiMockResponsePluginTests
     [InlineData("{ type: array, minItems: 3, uniqueItems: true, items: { type: string, format: date } }", "[\"2024-01-01\"]")]
     [InlineData("{ type: array, minItems: 2, uniqueItems: true, items: { type: object, properties: { id: { type: integer }, name: { type: string } } } }", "[{\"id\":0,\"name\":\"string\"},{\"id\":1,\"name\":\"string\"}]")]
     [InlineData("{ type: array, minItems: 2, items: { type: integer } }", "[0,0]")]
+    [InlineData("{ type: array, maxItems: 0, uniqueItems: true, items: { type: integer } }", "[]")]
     public void GenerateSample_HonorsUniqueItems(string schema, string expected)
     {
         var sample = OpenApiSchemaSampleGenerator.GenerateSample(ParseSchema(schema));
