@@ -3,6 +3,7 @@
 // See the LICENSE file in the project root for more information.
 
 using DevProxy.Abstractions.LanguageModel;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Net;
 using System.Text;
@@ -25,6 +26,18 @@ public class OpenAILanguageModelClientTests
             Requests.Add(request);
             return Task.FromResult(respond(request));
         }
+    }
+
+    private sealed class CapturingLogger : ILogger<OpenAILanguageModelClient>
+    {
+        public List<string> Messages { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Messages.Add(formatter(state, exception));
     }
 
     private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
@@ -77,15 +90,71 @@ public class OpenAILanguageModelClientTests
         _ = Assert.Single(handler.Requests);
     }
 
-    [Theory]
-    [InlineData(HttpStatusCode.Unauthorized)]
-    [InlineData(HttpStatusCode.Forbidden)]
-    public async Task IsEnabled_Unauthorized_IsDisabled(HttpStatusCode status)
+    [Fact]
+    public async Task IsEnabled_Unauthorized_IsDisabled()
     {
-        var (client, handler) = CreateClient(Config(apiKey: "wrong"), _ => Json(status, "{}"));
+        var (client, handler) = CreateClient(Config(apiKey: "wrong"), _ => Json(HttpStatusCode.Unauthorized, "{}"));
 
         Assert.False(await client.IsEnabledAsync(CancellationToken.None));
         _ = Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task IsEnabled_ModelsForbidden_FallsBackToCompletion()
+    {
+        var (client, handler) = CreateClient(Config(apiKey: "restricted"), r =>
+            r.Method == HttpMethod.Get
+                ? Json(HttpStatusCode.Forbidden, "{}")
+                : Json(HttpStatusCode.OK, ChatCompletionResponse));
+
+        Assert.True(await client.IsEnabledAsync(CancellationToken.None));
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task IsEnabled_FallbackCompletionFails_IsDisabled()
+    {
+        var (client, handler) = CreateClient(Config(), r =>
+            r.Method == HttpMethod.Get
+                ? Json(HttpStatusCode.NotFound, "{}")
+                : Json(HttpStatusCode.InternalServerError, "{}"));
+
+        Assert.False(await client.IsEnabledAsync(CancellationToken.None));
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("""{"data":{}}""")]
+    [InlineData("""{"data":[1]}""")]
+    [InlineData("""{"data":[{"id":42}]}""")]
+    public async Task IsEnabled_UnexpectedModelsPayload_FallsBackToCompletion(string payload)
+    {
+        var (client, handler) = CreateClient(Config(), r =>
+            r.Method == HttpMethod.Get
+                ? Json(HttpStatusCode.OK, payload)
+                : Json(HttpStatusCode.OK, ChatCompletionResponse));
+
+        Assert.True(await client.IsEnabledAsync(CancellationToken.None));
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task ErrorResponse_EchoingApiKey_IsRedactedInLogs()
+    {
+        var logger = new CapturingLogger();
+        var handler = new FakeHandler(r =>
+            r.Method == HttpMethod.Get
+                ? Json(HttpStatusCode.OK, """{"data":[{"id":"gpt-4.1-mini"}]}""")
+                : Json(HttpStatusCode.BadRequest, """{"error":{"message":"bad key super-secret-key"}}"""));
+        using var httpClient = new HttpClient(handler);
+        var client = new OpenAILanguageModelClient(httpClient, Config(apiKey: "super-secret-key"), logger);
+
+        _ = await client.GenerateChatCompletionAsync(
+            [new OpenAIChatCompletionMessage { Role = "user", Content = "hi" }], null, CancellationToken.None);
+
+        Assert.Contains(logger.Messages, m => m.Contains("bad key ***", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages, m => m.Contains("super-secret-key", StringComparison.Ordinal));
     }
 
     [Fact]

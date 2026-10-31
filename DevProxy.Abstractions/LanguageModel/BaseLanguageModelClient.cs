@@ -134,6 +134,16 @@ public abstract class BaseLanguageModelClient(LanguageModelConfiguration configu
         return (messages, options);
     }
 
+    protected string? RedactApiKey(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || string.IsNullOrEmpty(ApiKey))
+        {
+            return value;
+        }
+
+        return value.Replace(ApiKey, "***", StringComparison.Ordinal);
+    }
+
     protected void AddAuthenticationHeader(HttpRequestMessage request)
     {
         ArgumentNullException.ThrowIfNull(request);

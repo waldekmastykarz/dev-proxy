@@ -36,7 +36,7 @@ public sealed class OllamaLanguageModelClient(
 
         if (response.Error is not null)
         {
-            Logger.LogError("{Error}", response.Error);
+            Logger.LogError("{Error}", RedactApiKey(response.Error));
             return null;
         }
 
@@ -68,7 +68,7 @@ public sealed class OllamaLanguageModelClient(
         }
         if (response.Error is not null)
         {
-            Logger.LogError("{Error}", response.Error);
+            Logger.LogError("{Error}", RedactApiKey(response.Error));
             return null;
         }
         else
@@ -117,7 +117,7 @@ public sealed class OllamaLanguageModelClient(
             var testCompletion = await GenerateCompletionInternalAsync("Are you there? Reply with a yes or no.", null, cancellationToken);
             if (testCompletion?.Error is not null)
             {
-                Logger.LogError("Error: {Error}", testCompletion.Error);
+                Logger.LogError("Error: {Error}", RedactApiKey(testCompletion.Error));
                 return false;
             }
 
@@ -157,7 +157,7 @@ public sealed class OllamaLanguageModelClient(
             if (!response.IsSuccessStatusCode)
             {
                 var errorResponse = await response.Content.ReadAsStringAsync(cancellationToken);
-                Logger.LogDebug("LM error: {ErrorResponse}", errorResponse);
+                Logger.LogDebug("LM error: {ErrorResponse}", RedactApiKey(errorResponse));
                 return null;
             }
 
@@ -210,7 +210,7 @@ public sealed class OllamaLanguageModelClient(
             if (!response.IsSuccessStatusCode)
             {
                 var errorResponse = await response.Content.ReadAsStringAsync();
-                Logger.LogDebug("LM error: {ErrorResponse}", errorResponse);
+                Logger.LogDebug("LM error: {ErrorResponse}", RedactApiKey(errorResponse));
                 return null;
             }
 

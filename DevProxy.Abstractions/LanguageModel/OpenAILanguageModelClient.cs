@@ -30,7 +30,7 @@ public sealed class OpenAILanguageModelClient(
         }
         if (response.ErrorMessage is not null)
         {
-            _logger.LogError("Error: {Error}", response.ErrorMessage);
+            _logger.LogError("Error: {Error}", RedactApiKey(response.ErrorMessage));
             return null;
         }
         var openAIResponse = (OpenAIChatCompletionResponse)response;
@@ -78,7 +78,7 @@ public sealed class OpenAILanguageModelClient(
         }
         if (response.Error is not null)
         {
-            _logger.LogError("Error: {Error}. Code: {Code}", response.Error.Message, response.Error.Code);
+            _logger.LogError("Error: {Error}. Code: {Code}", RedactApiKey(response.Error.Message), response.Error.Code);
             return null;
         }
         else
@@ -145,9 +145,14 @@ public sealed class OpenAILanguageModelClient(
                 Content = "Are you there? Reply with a yes or no.",
                 Role = "user"
             }], null, cancellationToken);
-            if (testCompletion?.ErrorMessage is not null)
+            if (testCompletion is null)
             {
-                _logger.LogError("Error: {Error}", testCompletion.ErrorMessage);
+                _logger.LogError("Language model at {Url} didn't return a valid completion. Language model will be disabled", Configuration.Url);
+                return false;
+            }
+            if (testCompletion.ErrorMessage is not null)
+            {
+                _logger.LogError("Error: {Error}", RedactApiKey(testCompletion.ErrorMessage));
                 return false;
             }
 
@@ -185,7 +190,7 @@ public sealed class OpenAILanguageModelClient(
         {
             _logger.LogDebug("Response: {Response}", response.StatusCode);
 
-            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            if (response.StatusCode is HttpStatusCode.Unauthorized)
             {
                 _logger.LogError("Language model at {Url} rejected the request ({StatusCode}). Check the configured API key", Configuration.Url, (int)response.StatusCode);
                 return false;
@@ -209,10 +214,13 @@ public sealed class OpenAILanguageModelClient(
                 using var json = await JsonDocument.ParseAsync(
                     await response.Content.ReadAsStreamAsync(cancellationToken),
                     cancellationToken: cancellationToken);
-                if (json.RootElement.TryGetProperty("data", out var data) &&
+                if (json.RootElement.ValueKind == JsonValueKind.Object &&
+                    json.RootElement.TryGetProperty("data", out var data) &&
                     data.ValueKind == JsonValueKind.Array &&
                     data.EnumerateArray().Any(m =>
+                        m.ValueKind == JsonValueKind.Object &&
                         m.TryGetProperty("id", out var id) &&
+                        id.ValueKind == JsonValueKind.String &&
                         IsConfiguredModel(id.GetString())))
                 {
                     return true;
@@ -273,7 +281,7 @@ public sealed class OpenAILanguageModelClient(
             if (!response.IsSuccessStatusCode)
             {
                 var errorResponse = await response.Content.ReadAsStringAsync(cancellationToken);
-                _logger.LogDebug("LM error: {ErrorResponse}", errorResponse);
+                _logger.LogDebug("LM error: {ErrorResponse}", RedactApiKey(errorResponse));
                 return null;
             }
 
