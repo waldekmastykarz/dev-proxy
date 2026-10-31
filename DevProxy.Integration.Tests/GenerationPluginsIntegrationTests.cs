@@ -514,6 +514,29 @@ public sealed class GenerationPluginsIntegrationTests
     }
 
     [Fact]
+    public async Task OpenApiSpecGenerator_MergesArraySchemasAcrossRequests()
+    {
+        static RequestLog Exchange(string responseBody) =>
+            TestExchange
+                .Request("GET", "https://api.contoso.com/users")
+                .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: responseBody)
+                .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(
+            Exchange("""[ { "id": 1, "tags": [ { "id": 1 } ] } ]"""),
+            Exchange("""[ { "id": 2, "name": "alpha", "tags": [ { "id": 2, "label": "beta" } ] } ]"""));
+
+        var items = spec.RootElement.GetProperty("paths").GetProperty("/users").GetProperty("get")
+            .GetProperty("responses").GetProperty("200").GetProperty("content").GetProperty("application/json")
+            .GetProperty("schema").GetProperty("items");
+        static string[] PropertyNames(JsonElement schema) =>
+            [.. schema.GetProperty("properties").EnumerateObject().Select(p => p.Name)];
+
+        Assert.Equal(["id", "tags", "name"], PropertyNames(items));
+        Assert.Equal(["id", "label"], PropertyNames(items.GetProperty("properties").GetProperty("tags").GetProperty("items")));
+    }
+
+    [Fact]
     public async Task OpenApiSpecGenerator_SkipsResponseBodyWithoutContentType()
     {
         var exchange = TestExchange

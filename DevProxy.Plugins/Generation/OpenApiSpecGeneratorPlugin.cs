@@ -589,6 +589,13 @@ public sealed class OpenApiSpecGeneratorPlugin(
             return;
         }
 
+        if (source.Type == JsonSchemaType.Array && target.Type == JsonSchemaType.Array)
+        {
+            Logger.LogDebug("        Merging array items...");
+            MergeSchema(source.Items, target.Items);
+            return;
+        }
+
         if (source.Type != JsonSchemaType.Object || target.Type != JsonSchemaType.Object)
         {
             Logger.LogDebug("        Source or target schema is not an object. Skipping...");
@@ -617,9 +624,9 @@ public sealed class OpenApiSpecGeneratorPlugin(
                 continue;
             }
 
-            if (property.Value.Type != JsonSchemaType.Object)
+            if (property.Value.Type is not (JsonSchemaType.Object or JsonSchemaType.Array))
             {
-                Logger.LogDebug("        Property already found but is not an object. Skipping...");
+                Logger.LogDebug("        Property already found but is not an object or array. Skipping...");
                 continue;
             }
 
