@@ -430,18 +430,7 @@ internal static class LinuxCertificateHelper
         }
 
         var nssDir = GetNssDatabaseDirectory();
-        var passwordFile = CreateNssPasswordFile();
-        try
-        {
-            return TrustInNssDatabase(certutil, nssDir, passwordFile, pemFilePath, logger);
-        }
-        finally
-        {
-            if (passwordFile is not null)
-            {
-                CleanupFile(passwordFile);
-            }
-        }
+        return TrustInNssDatabase(certutil, nssDir, GetNssPasswordFile(), pemFilePath, logger);
     }
 
     private static bool TrustInNssDatabase(string certutil, string nssDir, string? passwordFile, string pemFilePath, ILogger logger)
@@ -488,26 +477,14 @@ internal static class LinuxCertificateHelper
     }
 
     /// <summary>
-    /// Without a terminal, certutil is given an empty password file (<c>-f</c>) so a
+    /// Without a terminal, certutil reads an empty password from /dev/null (<c>-f</c>) so a
     /// password-protected database fails with SEC_ERROR_TOKEN_NOT_LOGGED_IN instead of prompting
     /// on /dev/tty, which it does even when stdin is redirected. Databases without a password work
-    /// as usual. Returns null when interactive, so certutil can prompt.
+    /// as usual. Null when interactive, so certutil can prompt.
     /// </summary>
-    private static string? CreateNssPasswordFile()
-    {
-        if (GetContext().IsInteractive)
-        {
-            return null;
-        }
-        try
-        {
-            return WriteTempFile(string.Empty);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-    }
+    internal static string? GetNssPasswordFile(bool isInteractive) => isInteractive ? null : "/dev/null";
+
+    private static string? GetNssPasswordFile() => GetNssPasswordFile(GetContext().IsInteractive);
 
     internal static LinuxCommand GetCertutilCommand(string certutil, string? passwordFile, params string[] arguments) =>
         new(certutil, passwordFile is null ? arguments : [.. arguments, "-f", passwordFile]);
@@ -565,18 +542,7 @@ internal static class LinuxCertificateHelper
             return true;
         }
 
-        var passwordFile = CreateNssPasswordFile();
-        try
-        {
-            return RemoveFromNssDatabases(certutil, nssDirs, passwordFile, logger);
-        }
-        finally
-        {
-            if (passwordFile is not null)
-            {
-                CleanupFile(passwordFile);
-            }
-        }
+        return RemoveFromNssDatabases(certutil, nssDirs, GetNssPasswordFile(), logger);
     }
 
     private static bool RemoveFromNssDatabases(string certutil, string[] nssDirs, string? passwordFile, ILogger logger)

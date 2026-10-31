@@ -372,6 +372,14 @@ public class LinuxCertificateHelperTests
         Assert.Equal(["-m", "0600", "/usr/local/share/ca-certificates/devproxy-ca.crt", "/tmp/devproxy-x/previous.crt"], command.Arguments);
     }
 
+    [Theory]
+    [InlineData(true, null)]
+    [InlineData(false, "/dev/null")]
+    public void GetNssPasswordFile_EmptyPasswordOnlyWithoutTerminal(bool isInteractive, string? expected)
+    {
+        Assert.Equal(expected, LinuxCertificateHelper.GetNssPasswordFile(isInteractive));
+    }
+
     // Without a terminal, certutil gets an empty password file so a password-protected database
     // fails (SEC_ERROR_TOKEN_NOT_LOGGED_IN) instead of prompting on /dev/tty.
     [Fact]
