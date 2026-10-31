@@ -1,0 +1,196 @@
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
+
+using DevProxy.Abstractions.Proxy.Http;
+using Microsoft.Extensions.Logging;
+using System.IdentityModel.Tokens.Jwt;
+using System.Web;
+
+namespace DevProxy.Plugins.Generation;
+
+internal enum DetectedApiKeyLocation
+{
+    Header,
+    Query
+}
+
+internal enum DetectedOAuth2FlowType
+{
+    AuthorizationCode,
+    ClientCredentials
+}
+
+internal abstract record DetectedAuth;
+
+internal sealed record DetectedApiKeyAuth(string Name, DetectedApiKeyLocation In) : DetectedAuth;
+
+internal sealed record DetectedBearerAuth : DetectedAuth;
+
+internal sealed record DetectedOAuth2Auth(
+    string Name,
+    DetectedOAuth2FlowType FlowType,
+    string AuthorizationUrl,
+    string TokenUrl,
+    string RefreshUrl,
+    IReadOnlyList<string> Scopes) : DetectedAuth
+{
+    public const string EntraName = "EntraOAuth2Auth";
+    public const string GenericName = "APIOAuth2Auth";
+}
+
+/// <summary>
+/// Detects how a recorded request authenticates, based on its headers and
+/// query string. Shared by the API spec generator plugins.
+/// </summary>
+internal static class AuthDetector
+{
+    public static DetectedAuth? Detect(IHttpRequest httpRequest, ILogger logger)
+    {
+        ArgumentNullException.ThrowIfNull(httpRequest);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        logger.LogTrace("Entered {Name}", nameof(Detect));
+
+        var authHeaders = httpRequest.Headers
+            .Where(h => Models.Http.AuthHeaders.Contains(h.Name.ToLowerInvariant()))
+            .Select(h => (h.Name, h.Value));
+
+        foreach (var (name, value) in authHeaders)
+        {
+            if (name.Equals("cookie", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!name.Equals("authorization", StringComparison.OrdinalIgnoreCase) ||
+                !value.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogTrace("Left {Name}", nameof(Detect));
+                return new DetectedApiKeyAuth(name, DetectedApiKeyLocation.Header);
+            }
+
+            var bearerToken = value["Bearer ".Length..].Trim();
+            logger.LogTrace("Left {Name}", nameof(Detect));
+            return DetectAuthorizationAuth(bearerToken, logger);
+        }
+
+        var authQueryParam = GetAuthQueryParameter(httpRequest.RequestUri);
+        if (authQueryParam is not null)
+        {
+            logger.LogDebug("Found auth query parameter: {AuthQueryParam}", authQueryParam);
+            logger.LogTrace("Left {Name}", nameof(Detect));
+            return new DetectedApiKeyAuth(authQueryParam, DetectedApiKeyLocation.Query);
+        }
+
+        logger.LogDebug("No auth headers or query parameters found");
+        logger.LogTrace("Left {Name}", nameof(Detect));
+        return null;
+    }
+
+    public static string? GetAuthQueryParameter(Uri requestUri)
+    {
+        ArgumentNullException.ThrowIfNull(requestUri);
+
+        var query = HttpUtility.ParseQueryString(requestUri.Query);
+        return query.AllKeys
+            .FirstOrDefault(k => k is not null && Models.Http.AuthHeaders.Contains(k.ToLowerInvariant()));
+    }
+
+    private static DetectedAuth DetectAuthorizationAuth(string bearerToken, ILogger logger)
+    {
+        logger.LogTrace("Entered {Name}", nameof(DetectAuthorizationAuth));
+
+        if (!IsJwtToken(bearerToken, logger, out var jwtToken))
+        {
+            logger.LogTrace("Left {Name}", nameof(DetectAuthorizationAuth));
+            return new DetectedBearerAuth();
+        }
+
+        var issuer = jwtToken.Issuer;
+        logger.LogDebug("Issuer: {Issuer}", issuer);
+        var scopes = jwtToken.Claims
+            .Where(c => c.Type == "scp")
+            .SelectMany(c => c.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .Distinct()
+            .ToList();
+        if (logger.IsEnabled(LogLevel.Debug))
+        {
+            logger.LogDebug("Scopes: {Scopes}", string.Join(", ", scopes));
+        }
+        var roles = jwtToken.Claims
+            .Where(c => c.Type == "roles")
+            .SelectMany(c => c.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .Distinct()
+            .ToList();
+        if (logger.IsEnabled(LogLevel.Debug))
+        {
+            logger.LogDebug("Roles: {Roles}", string.Join(", ", roles));
+        }
+        scopes.AddRange(roles);
+
+        DetectedOAuth2Auth auth;
+        if (IsEntraToken(issuer, logger))
+        {
+            var version = jwtToken.Claims
+                .FirstOrDefault(c => c.Type == "ver")?.Value ?? "1.0";
+            var baseUrl = issuer.Contains("v2.0", StringComparison.OrdinalIgnoreCase) ?
+                issuer.Replace("v2.0", "", StringComparison.OrdinalIgnoreCase) : issuer;
+            var tokenUrl = version == "1.0" ? $"{baseUrl}oauth2/token" : $"{baseUrl}oauth2/v2.0/token";
+            auth = new(
+                DetectedOAuth2Auth.EntraName,
+                roles.Count != 0 ? DetectedOAuth2FlowType.ClientCredentials : DetectedOAuth2FlowType.AuthorizationCode,
+                version == "1.0" ? $"{baseUrl}oauth2/authorize" : $"{baseUrl}oauth2/v2.0/authorize",
+                tokenUrl,
+                tokenUrl,
+                scopes);
+        }
+        else
+        {
+            auth = new(
+                DetectedOAuth2Auth.GenericName,
+                DetectedOAuth2FlowType.AuthorizationCode,
+                issuer,
+                issuer,
+                string.Empty,
+                scopes);
+        }
+
+        logger.LogTrace("Left {Name}", nameof(DetectAuthorizationAuth));
+        return auth;
+    }
+
+    private static bool IsEntraToken(string issuer, ILogger logger)
+    {
+        logger.LogTrace("Entered {Name}", nameof(IsEntraToken));
+
+        var isEntraToken = issuer.Contains("https://login.microsoftonline.com/", StringComparison.OrdinalIgnoreCase) ||
+            issuer.Contains("https://sts.windows.net/", StringComparison.OrdinalIgnoreCase);
+
+        logger.LogDebug("Is token from Entra? {IsEntraToken}", isEntraToken);
+        logger.LogTrace("Left {Name}", nameof(IsEntraToken));
+
+        return isEntraToken;
+    }
+
+    private static bool IsJwtToken(string bearerToken, ILogger logger, out JwtSecurityToken jwtToken)
+    {
+        logger.LogTrace("Entered {Name}", nameof(IsJwtToken));
+
+        jwtToken = new();
+
+        try
+        {
+            jwtToken = new(bearerToken);
+            logger.LogTrace("Left {Name}", nameof(IsJwtToken));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug("Failed to parse JWT token: {Ex}", ex.Message);
+        }
+
+        logger.LogTrace("Left {Name}", nameof(IsJwtToken));
+        return false;
+    }
+}
