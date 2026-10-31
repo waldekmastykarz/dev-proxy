@@ -643,7 +643,7 @@ public sealed class OpenApiSpecGeneratorPlugin(
                 },
                 []),
             DetectedOAuth2Auth oauth2 => (
-                oauth2.Name,
+                GetOAuth2SchemeName(oauth2),
                 new OpenApiSecurityScheme
                 {
                     Type = SecuritySchemeType.OAuth2,
@@ -677,6 +677,11 @@ public sealed class OpenApiSpecGeneratorPlugin(
 
         return (schemeName, scopes);
     }
+
+    // Swagger 2.0 allows only one flow per security scheme
+    private string GetOAuth2SchemeName(DetectedOAuth2Auth oauth2) =>
+        Configuration.SpecVersion == SpecVersion.v2_0 && oauth2.FlowType == DetectedOAuth2FlowType.ClientCredentials ?
+            $"{oauth2.Name}_clientCredentials" : oauth2.Name;
 
     private static void MergeOAuth2Flow(OpenApiSecurityScheme scheme, DetectedOAuth2Auth oauth2)
     {

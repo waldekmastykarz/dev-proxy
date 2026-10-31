@@ -350,6 +350,44 @@ public sealed class GenerationAuthIntegrationTests
     }
 
     [Fact]
+    public async Task OpenApiSpecGenerator_V2_DelegatedAndAppTokens_EmitSeparateSchemes()
+    {
+        var doc = await GenerateOpenApiJsonAsync(
+            [
+                Exchange("https://api.contoso.com/users", ("Authorization", $"Bearer {Jwt(EntraIssuerV2, version: "2.0", scp: "User.Read")}")),
+                Exchange("https://api.contoso.com/users", ("Authorization", $"Bearer {Jwt(EntraIssuerV2, version: "2.0", roles: ["User.Read.All"])}")),
+            ],
+            PluginConfig.FromJson("""{ "specVersion": "v2_0" }"""));
+
+        var delegated = doc["securityDefinitions"]!["EntraOAuth2Auth"]!;
+        Assert.Equal("accessCode", delegated["flow"]!.GetValue<string>());
+        Assert.Equal(["User.Read"], delegated["scopes"]!.AsObject().Select(s => s.Key));
+        var app = doc["securityDefinitions"]!["EntraOAuth2Auth_clientCredentials"]!;
+        Assert.Equal("application", app["flow"]!.GetValue<string>());
+        Assert.Equal(["User.Read.All"], app["scopes"]!.AsObject().Select(s => s.Key));
+        Assert.Equal(["User.Read"], RequirementScopes(Operation(doc), "EntraOAuth2Auth"));
+        Assert.Equal(["User.Read.All"], RequirementScopes(Operation(doc), "EntraOAuth2Auth_clientCredentials"));
+    }
+
+    [Theory]
+    [InlineData("https://attacker.example/https://login.microsoftonline.com/tenant/v2.0")]
+    [InlineData("http://login.microsoftonline.com/tenant/v2.0")]
+    [InlineData("https://login.microsoftonline.com.attacker.example/tenant/v2.0")]
+    public async Task Generators_SpoofedEntraIssuer_FallBackToBearer(string issuer)
+    {
+        var token = Jwt(issuer, version: "2.0", roles: ["User.Read.All"]);
+        var logs = new[] { Exchange("https://api.contoso.com/users", ("Authorization", $"Bearer {token}")) };
+
+        var doc = await GenerateOpenApiJsonAsync(logs);
+        Assert.Equal("JWT", SecurityScheme(doc, "BearerAuth")["bearerFormat"]!.GetValue<string>());
+        Assert.Null(doc["components"]!["securitySchemes"]!["EntraOAuth2Auth"]);
+
+        var tsp = await GenerateTypeSpecAsync(logs);
+        Assert.Contains("@useAuth(BearerAuth)", tsp, StringComparison.Ordinal);
+        Assert.DoesNotContain("attacker", tsp, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TypeSpecGenerator_EntraDelegatedToken_UsesOAuth2Auth()
     {
         var token = Jwt(EntraIssuerV2, version: "2.0", scp: "User.Read Mail.Read");

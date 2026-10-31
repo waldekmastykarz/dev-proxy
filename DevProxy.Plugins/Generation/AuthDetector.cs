@@ -165,8 +165,11 @@ internal static class AuthDetector
     {
         logger.LogTrace("Entered {Name}", nameof(IsEntraToken));
 
-        var isEntraToken = issuer.Contains("https://login.microsoftonline.com/", StringComparison.OrdinalIgnoreCase) ||
-            issuer.Contains("https://sts.windows.net/", StringComparison.OrdinalIgnoreCase);
+        var isEntraToken = Uri.TryCreate(issuer, UriKind.Absolute, out var issuerUri) &&
+            issuerUri.Scheme == Uri.UriSchemeHttps &&
+            issuerUri.IsDefaultPort &&
+            (issuerUri.Host.Equals("login.microsoftonline.com", StringComparison.OrdinalIgnoreCase) ||
+            issuerUri.Host.Equals("sts.windows.net", StringComparison.OrdinalIgnoreCase));
 
         logger.LogDebug("Is token from Entra? {IsEntraToken}", isEntraToken);
         logger.LogTrace("Left {Name}", nameof(IsEntraToken));
