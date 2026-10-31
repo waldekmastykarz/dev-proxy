@@ -2,6 +2,7 @@ using DevProxy.Abstractions.Plugins;
 using DevProxy.Abstractions.Proxy;
 using DevProxy.Abstractions.Utils;
 using DevProxy.Proxy;
+using DevProxy.Proxy.Kestrel;
 using DevProxy.State;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -303,6 +304,16 @@ sealed class DevProxyCommand : RootCommand
         }
 
         ConfigureFromOptions(parseResult);
+
+        var portConflict =
+            await PortConflict.CheckAsync(PortKind.Proxy, _proxyConfiguration.IPAddress, _proxyConfiguration.Port, cancellationToken) ??
+            await PortConflict.CheckAsync(PortKind.Api, _proxyConfiguration.ApiIpAddress, _proxyConfiguration.ApiPort, cancellationToken);
+        if (portConflict is not null)
+        {
+            _logger.LogError("{PortConflict}", portConflict);
+            return 1;
+        }
+
         var optionsLoadedArgs = new OptionsLoadedArgs(parseResult);
         foreach (var plugin in _plugins.Where(p => p.Enabled))
         {
@@ -338,11 +349,25 @@ sealed class DevProxyCommand : RootCommand
 
             await _app.WaitForShutdownAsync(cancellationToken);
 
+            if (_app.Services.GetServices<IHostedService>().OfType<KestrelProxyEngine>().Any(e => e.PortInUse))
+            {
+                _logger.LogError("{PortConflict}",
+                    await PortConflict.GetMessageAsync(PortKind.Proxy, _proxyConfiguration.Port, CancellationToken.None));
+                return 1;
+            }
+
             return 0;
         }
         catch (TaskCanceledException)
         {
             throw;
+        }
+        catch (Exception ex) when (PortConflict.IsAddressInUse(ex))
+        {
+            // The API port was taken between the pre-flight check and binding.
+            _logger.LogError("{PortConflict}",
+                await PortConflict.GetMessageAsync(PortKind.Api, _proxyConfiguration.ApiPort, CancellationToken.None));
+            return 1;
         }
         catch (Exception ex)
         {

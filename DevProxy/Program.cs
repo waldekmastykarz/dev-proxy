@@ -101,21 +101,17 @@ static async Task<int> StartDetachedProcessAsync(string[] args)
         var requestedPort = earlyOptions.Port ?? 8000;
         var requestedApiPort = earlyOptions.ApiPort ?? 8897;
 
-        foreach (var existing in existingStates)
+        var proxyPortOwner = PortConflict.FindOwningInstance(existingStates, PortKind.Proxy, requestedPort, Environment.ProcessId);
+        var apiPortOwner = PortConflict.FindOwningInstance(existingStates, PortKind.Api, requestedApiPort, Environment.ProcessId);
+        var conflictMessage = proxyPortOwner is not null
+            ? PortConflict.FormatMessage(PortKind.Proxy, requestedPort, proxyPortOwner)
+            : apiPortOwner is not null
+                ? PortConflict.FormatMessage(PortKind.Api, requestedApiPort, apiPortOwner)
+                : null;
+        if (conflictMessage is not null)
         {
-            if (requestedPort != 0 && existing.Port == requestedPort)
-            {
-                await Console.Error.WriteLineAsync($"Port {requestedPort} is already in use by Dev Proxy instance (PID: {existing.Pid}).");
-                await Console.Error.WriteLineAsync("Use a different --port or stop the existing instance first.");
-                return 1;
-            }
-
-            if (requestedApiPort != 0 && existing.ApiUrl.EndsWith($":{requestedApiPort}", StringComparison.Ordinal))
-            {
-                await Console.Error.WriteLineAsync($"API port {requestedApiPort} is already in use by Dev Proxy instance (PID: {existing.Pid}).");
-                await Console.Error.WriteLineAsync("Use a different --api-port or stop the existing instance first.");
-                return 1;
-            }
+            await Console.Error.WriteLineAsync(isJsonOutput ? FormatJsonLogEntry("error", conflictMessage) : conflictMessage);
+            return 1;
         }
     }
 
@@ -234,9 +230,17 @@ static async Task<int> StartDetachedProcessAsync(string[] args)
             {
                 var errorOutput = await process.StandardError.ReadToEndAsync();
                 var standardOutput = await process.StandardOutput.ReadToEndAsync();
+                // The daemon redirects its console to its log file, so that's where
+                // the reason for the failure (like a port conflict) ends up.
+                var logOutput = await ReadDaemonLogAsync(process.Id);
 
                 if (isJsonOutput)
                 {
+                    // The daemon's log already consists of JSONL entries; pass them through as-is.
+                    if (!string.IsNullOrEmpty(logOutput))
+                    {
+                        await Console.Error.WriteLineAsync(logOutput.TrimEnd());
+                    }
                     var message = "Dev Proxy failed to start.";
                     if (!string.IsNullOrEmpty(errorOutput))
                     {
@@ -251,6 +255,10 @@ static async Task<int> StartDetachedProcessAsync(string[] args)
                 else
                 {
                     await Console.Error.WriteLineAsync("Dev Proxy failed to start.");
+                    if (!string.IsNullOrEmpty(logOutput))
+                    {
+                        await Console.Error.WriteLineAsync(logOutput.TrimEnd());
+                    }
                     if (!string.IsNullOrEmpty(errorOutput))
                     {
                         await Console.Error.WriteLineAsync(errorOutput);
@@ -334,6 +342,26 @@ static string FormatJsonLogEntry(string level, string message)
         timestamp = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture)
     };
     return JsonSerializer.Serialize(entry, jsonlOptions);
+}
+
+static async Task<string?> ReadDaemonLogAsync(int pid)
+{
+    try
+    {
+        var logsFolder = StateManager.GetLogsFolder();
+        if (!Directory.Exists(logsFolder))
+        {
+            return null;
+        }
+        var logFile = Directory.GetFiles(logsFolder, $"devproxy-{pid}-*.log")
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault();
+        return logFile is null ? null : await File.ReadAllTextAsync(logFile);
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+    {
+        return null;
+    }
 }
 
 static bool IsJsonOutputRequested(string[] args)
