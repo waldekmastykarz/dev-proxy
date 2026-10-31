@@ -991,4 +991,38 @@ public sealed class OpenApiValidationPluginTests : IDisposable
         Assert.Empty(valid!.Issues);
         Assert.Equal("$: Expected string but got integer", Assert.Single(Messages(invalid)));
     }
+
+    [Fact]
+    public async Task ValidatesLargeInvalidArraysInLinearTime()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("array.yaml", """
+            openapi: 3.0.3
+            info: { title: Array, version: "1.0" }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                get:
+                  responses:
+                    "200":
+                      description: ok
+                      content:
+                        application/json:
+                          schema:
+                            type: array
+                            items:
+                              allOf:
+                                - type: string
+            """));
+        const int count = 20_000;
+        var body = $"[{string.Join(',', Enumerable.Repeat("1", count))}]";
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var result = plugin.Validate(TestExchange.Request("GET", "https://api.fabrikam.com/items")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: body).Session);
+        stopwatch.Stop();
+
+        Assert.Equal(count, result!.Issues.Count());
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"Validation took {stopwatch.Elapsed}");
+    }
 }

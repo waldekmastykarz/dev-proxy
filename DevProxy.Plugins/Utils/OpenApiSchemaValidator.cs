@@ -298,6 +298,9 @@ internal static class OpenApiSchemaValidator
             return;
         }
 
+        // errors reported for this value start here; earlier errors belong to
+        // other values, so they don't need to be considered for deduplication
+        var firstError = errors.Count;
         if (!ValidateType(value, schema, path, errors))
         {
             // no point validating further if the type doesn't match
@@ -322,7 +325,7 @@ internal static class OpenApiSchemaValidator
 
         if (schema.AllOf is { Count: > 0 })
         {
-            var seen = new HashSet<SchemaValidationError>(errors);
+            var seen = new HashSet<SchemaValidationError>(errors.Skip(firstError));
             for (var i = 0; i < schema.AllOf.Count; i++)
             {
                 foreach (var subError in ValidateComposed(value, schema.AllOf[i], direction, path, state, depth + 1))
