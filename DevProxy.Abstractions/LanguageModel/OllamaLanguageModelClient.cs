@@ -139,16 +139,19 @@ public sealed class OllamaLanguageModelClient(
             var url = $"{Configuration.Url?.TrimEnd('/')}/api/generate";
             Logger.LogDebug("Requesting completion. Prompt: {Prompt}", prompt);
 
-            var response = await _httpClient.PostAsJsonAsync(url,
-                new
+            using var request = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = JsonContent.Create(new
                 {
                     prompt,
                     model = Configuration.Model,
                     stream = false,
                     options
-                },
-                cancellationToken
-            );
+                })
+            };
+            AddAuthenticationHeader(request);
+
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
             Logger.LogDebug("Response status: {Response}", response.StatusCode);
 
             if (!response.IsSuccessStatusCode)
@@ -189,15 +192,19 @@ public sealed class OllamaLanguageModelClient(
                 Logger.LogDebug("Requesting chat completion. Message: {LastMessage}", messages.Last().Content);
             }
 
-            var response = await _httpClient.PostAsJsonAsync(url,
-                new
+            using var request = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = JsonContent.Create(new
                 {
                     messages,
                     model = Configuration.Model,
                     stream = false,
                     options
-                }
-            );
+                })
+            };
+            AddAuthenticationHeader(request);
+
+            using var response = await _httpClient.SendAsync(request);
             Logger.LogDebug("Response: {Response}", response.StatusCode);
 
             if (!response.IsSuccessStatusCode)

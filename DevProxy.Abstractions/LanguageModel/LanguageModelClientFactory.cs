@@ -21,6 +21,7 @@ public static class LanguageModelClientFactory
         {
             LanguageModelClient.Ollama => ActivatorUtilities.CreateInstance<OllamaLanguageModelClient>(serviceProvider, config),
             LanguageModelClient.OpenAI => ActivatorUtilities.CreateInstance<OpenAILanguageModelClient>(serviceProvider, config),
+            LanguageModelClient.AzureOpenAI => ActivatorUtilities.CreateInstance<OpenAILanguageModelClient>(serviceProvider, config),
             _ => ActivatorUtilities.CreateInstance<OpenAILanguageModelClient>(serviceProvider, config)
         };
     }
