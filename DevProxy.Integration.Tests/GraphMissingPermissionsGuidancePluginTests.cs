@@ -192,6 +192,42 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
         Assert.Contains("requesturl=%2Fme%2Fmessages", Assert.Single(handler.Requests).Query, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task MockedForbiddenResponse_IsIgnored()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/me/messages", [("Authorization", BearerToken(scp: "User.Read"))]);
+        exchange.Session.Respond("{}", HttpStatusCode.Forbidden, []);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        Assert.Empty(factory.LogsOfType(MessageType.Failed));
+        Assert.Empty(factory.LogsOfType(MessageType.Warning));
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Forbidden_DodGraphHost_LogsFailed()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var factory = new CapturingLoggerFactory();
+#pragma warning disable CA2000 // HttpClient doesn't own the handler; the test disposes it
+        var plugin = new GraphMissingPermissionsGuidancePlugin(
+            new HttpClient(handler, disposeHandler: false),
+            new Logger<GraphMissingPermissionsGuidancePlugin>(factory),
+            KestrelProxyHarness.BuildUrlsToWatch("dod-graph.microsoft.us"));
+#pragma warning restore CA2000
+
+        var exchange = TestExchange
+            .Request("GET", "https://dod-graph.microsoft.us/v1.0/me/messages", [("Authorization", BearerToken(scp: "User.Read"))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        _ = Assert.Single(factory.LogsOfType(MessageType.Failed));
+    }
+
     private static (GraphMissingPermissionsGuidancePlugin Plugin, CapturingLoggerFactory Factory) CreatePlugin(HttpMessageHandler handler)
     {
         var factory = new CapturingLoggerFactory();
