@@ -169,6 +169,12 @@ internal sealed class StopCommand : Command
 
     private static async Task<int> ForceStopAsync(ProxyInstanceState state, CancellationToken cancellationToken)
     {
+        if (GetProcessIdentity(state) == ProcessIdentity.Unverifiable)
+        {
+            Console.WriteLine($"Cannot verify that PID {state.Pid} is Dev Proxy; refusing to terminate it.");
+            return 1;
+        }
+
         // A killed process can't run its own cleanup, so restore the system proxy
         // on its behalf before terminating it.
         if (state.AsSystemProxy)
@@ -179,14 +185,33 @@ internal sealed class StopCommand : Command
         try
         {
             using var process = Process.GetProcessById(state.Pid);
-            // Never kill an unrelated process that reused the PID.
-            if (!StateManager.IsSameProcess(process, state))
+            var identity = StateManager.VerifyProcessIdentity(process, state);
+            // Never kill an unrelated process that reused the PID, or one
+            // whose identity can't be verified.
+            if (identity == ProcessIdentity.Unverifiable)
+            {
+                Console.WriteLine($"Cannot verify that PID {state.Pid} is Dev Proxy; refusing to terminate it.");
+                return 1;
+            }
+
+            if (identity == ProcessIdentity.Mismatch)
             {
                 Console.WriteLine("Dev Proxy process not found (already stopped).");
             }
             else
             {
                 process.Kill();
+                // Let the process exit so its PID-keyed token can be removed.
+                using var exitTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                exitTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+                try
+                {
+                    await process.WaitForExitAsync(exitTimeout.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Token is cleaned up later by the stale-credential sweep
+                }
                 Console.WriteLine($"Forcefully terminated Dev Proxy (PID: {state.Pid}).");
             }
         }
@@ -206,5 +231,18 @@ internal sealed class StopCommand : Command
 
         await StateManager.DeleteStateAsync(state.Pid, cancellationToken);
         return 0;
+    }
+
+    private static ProcessIdentity? GetProcessIdentity(ProxyInstanceState state)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(state.Pid);
+            return StateManager.VerifyProcessIdentity(process, state);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            return null;
+        }
     }
 }

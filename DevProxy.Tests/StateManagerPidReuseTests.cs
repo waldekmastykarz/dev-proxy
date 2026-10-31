@@ -103,6 +103,20 @@ public class StateManagerPidReuseTests
     }
 
     [Fact]
+    public void VerifyProcessIdentity_ReportsMatchMismatchAndNotRecorded()
+    {
+        using var process = Process.GetCurrentProcess();
+        var startTime = StateManager.GetCurrentProcessStartTime()!.Value;
+
+        Assert.Equal(ProcessIdentity.Match,
+            StateManager.VerifyProcessIdentity(process, new ProxyInstanceState { Pid = process.Id, ProcessStartTime = startTime }));
+        Assert.Equal(ProcessIdentity.Mismatch,
+            StateManager.VerifyProcessIdentity(process, new ProxyInstanceState { Pid = process.Id, ProcessStartTime = startTime.AddMinutes(-30) }));
+        Assert.Equal(ProcessIdentity.NotRecorded,
+            StateManager.VerifyProcessIdentity(process, new ProxyInstanceState { Pid = process.Id }));
+    }
+
+    [Fact]
     public void GetLogStartTime_UsesRecordedProcessStartTime()
     {
         var recorded = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);

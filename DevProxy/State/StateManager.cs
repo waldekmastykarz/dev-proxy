@@ -246,7 +246,14 @@ internal static class StateManager
     public static async Task DeleteStateAsync(int pid, CancellationToken cancellationToken = default)
     {
         DeleteFile(GetInstanceStateFilePath(pid));
-        DeleteFile(ApiSecurity.GetTokenFilePath(pid));
+        if (pid == Environment.ProcessId)
+        {
+            DeleteFile(ApiSecurity.GetTokenFilePath(pid));
+        }
+        else
+        {
+            DeleteTokenIfProcessGone(pid);
+        }
 
         // Also clean up legacy state file if it belongs to this PID
         var legacyPath = GetStateFilePath();
@@ -329,20 +336,29 @@ internal static class StateManager
     /// state has no recorded start time (written by an older version) or the
     /// process start time can't be read, preserving PID-only behavior.
     /// </summary>
-    internal static bool IsSameProcess(Process process, ProxyInstanceState state)
+    internal static bool IsSameProcess(Process process, ProxyInstanceState state) =>
+        VerifyProcessIdentity(process, state) != ProcessIdentity.Mismatch;
+
+    /// <summary>
+    /// Compares <paramref name="process"/> against the identity recorded in
+    /// <paramref name="state"/>.
+    /// </summary>
+    internal static ProcessIdentity VerifyProcessIdentity(Process process, ProxyInstanceState state)
     {
         if (state.ProcessStartTime is not { } recorded)
         {
-            return true;
+            return ProcessIdentity.NotRecorded;
         }
 
         var actual = GetProcessStartTime(process);
         if (actual is null)
         {
-            return true;
+            return ProcessIdentity.Unverifiable;
         }
 
-        return (actual.Value - recorded).Duration() <= _startTimeTolerance;
+        return (actual.Value - recorded).Duration() <= _startTimeTolerance
+            ? ProcessIdentity.Match
+            : ProcessIdentity.Mismatch;
     }
 
     private static DateTimeOffset? GetProcessStartTime(Process process)
@@ -401,7 +417,7 @@ internal static class StateManager
         {
             // Clean up stale state file
             DeleteFile(filePath);
-            DeleteFile(ApiSecurity.GetTokenFilePath(state.Pid));
+            DeleteTokenIfProcessGone(state.Pid);
             return null;
         }
 
@@ -435,6 +451,17 @@ internal static class StateManager
         catch (IOException)
         {
             return null;
+        }
+    }
+
+    // Tokens are keyed by PID only. If the PID was reused by a new Dev Proxy
+    // instance, the token belongs to it, so keep it while the PID is alive.
+    // Leftover tokens are swept by LoadAllStatesAsync once the PID exits.
+    private static void DeleteTokenIfProcessGone(int pid)
+    {
+        if (!IsProcessRunning(pid))
+        {
+            DeleteFile(ApiSecurity.GetTokenFilePath(pid));
         }
     }
 
