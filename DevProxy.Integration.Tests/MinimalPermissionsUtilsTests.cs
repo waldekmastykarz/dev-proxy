@@ -81,6 +81,22 @@ public sealed class MinimalPermissionsUtilsTests : IDisposable
     }
 
     [Fact]
+    public void ResolveApiSpecVariables_Json_ResolvesLegacyVariablesInKeys()
+    {
+        var json = """{ "paths": { "/{TENANT_ID}/users/{id}": {}, "/$${TENANT_ID}": {} } }""";
+        var logger = new WarningLogger();
+
+        var result = MinimalPermissionsUtils.ResolveApiSpecVariables(json, "spec.json", new() { ["TENANT_ID"] = "contoso" }, logger);
+
+        using var doc = JsonDocument.Parse(result);
+        var paths = doc.RootElement.GetProperty("paths");
+        Assert.True(paths.TryGetProperty("/contoso/users/{id}", out _));
+        // keys aren't resolved, but the legacy pass must not change placeholders
+        Assert.True(paths.TryGetProperty("/$${TENANT_ID}", out _));
+        _ = Assert.Single(logger.Warnings, w => w.Contains("deprecated", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void ResolveApiSpecVariables_EscapedPlaceholderOnly_NoDeprecationWarning()
     {
         var logger = new WarningLogger();

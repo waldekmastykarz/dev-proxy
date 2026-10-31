@@ -36,19 +36,14 @@ static class MinimalPermissionsUtils
         {
             // resolve values in the parsed document so that values with quotes don't break it
             // and keys aren't changed
-            if (Path.GetExtension(filePath).Equals(".json", StringComparison.OrdinalIgnoreCase))
-            {
-                resolved = EnvironmentVariablePlaceholders.ResolveInJson(fileContents, Environment.GetEnvironmentVariable, unresolvedVariables, transformText);
-            }
-            else
-            {
-                // unquoted legacy values like `url: {NAME}` parse as YAML flow mappings,
-                // so replace legacy variables in the raw text first, like before
-                var withLegacyVariables = transformText is null
-                    ? fileContents
-                    : EnvironmentVariablePlaceholders.TransformOutsidePlaceholders(fileContents, transformText);
-                resolved = EnvironmentVariablePlaceholders.ResolveInYaml(withLegacyVariables, Environment.GetEnvironmentVariable, unresolvedVariables);
-            }
+            // legacy variables were always replaced in the raw text, including keys like
+            // OpenAPI paths and unquoted YAML values like `url: {NAME}`, so keep doing that
+            var withLegacyVariables = transformText is null
+                ? fileContents
+                : EnvironmentVariablePlaceholders.TransformOutsidePlaceholders(fileContents, transformText);
+            resolved = Path.GetExtension(filePath).Equals(".json", StringComparison.OrdinalIgnoreCase)
+                ? EnvironmentVariablePlaceholders.ResolveInJson(withLegacyVariables, Environment.GetEnvironmentVariable, unresolvedVariables)
+                : EnvironmentVariablePlaceholders.ResolveInYaml(withLegacyVariables, Environment.GetEnvironmentVariable, unresolvedVariables);
         }
         catch (Exception ex) when (ex is JsonException or YamlException)
         {
