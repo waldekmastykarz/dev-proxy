@@ -2,13 +2,48 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using DevProxy.Abstractions.Utils;
 using Microsoft.Extensions.Logging;
 using System.IdentityModel.Tokens.Jwt;
+using System.Text.Json;
 
 namespace DevProxy.Plugins.Utils;
 
 static class MinimalPermissionsUtils
 {
+    /// <summary>
+    /// Resolves environment variable placeholders (<c>${NAME}</c>) in an API
+    /// specification and the deprecated <c>{NAME}</c> variables passed with --env.
+    /// </summary>
+    public static string ResolveApiSpecVariables(string fileContents, string filePath, Dictionary<string, string> legacyVariables, ILogger logger)
+    {
+        var unresolvedVariables = new List<string>();
+        string resolved;
+        try
+        {
+            // resolve JSON at the value level so that values with quotes don't break the document
+            resolved = Path.GetExtension(filePath).Equals(".json", StringComparison.OrdinalIgnoreCase)
+                ? EnvironmentVariablePlaceholders.ResolveInJson(fileContents, unresolvedVariables)
+                : EnvironmentVariablePlaceholders.Resolve(fileContents, unresolvedVariables);
+        }
+        catch (JsonException)
+        {
+            unresolvedVariables.Clear();
+            resolved = EnvironmentVariablePlaceholders.Resolve(fileContents, unresolvedVariables);
+        }
+        EnvironmentVariablePlaceholders.LogUnresolvedVariables(logger, unresolvedVariables, filePath);
+
+        var withLegacyVariables = ProxyUtils.ReplaceVariables(resolved, legacyVariables, v => $"{{{v}}}");
+        if (!string.Equals(resolved, withLegacyVariables, StringComparison.Ordinal))
+        {
+            logger.LogWarning(
+                "Referencing variables using {{NAME}} in {File} is deprecated and will be removed in a future version. Use ${{NAME}} instead",
+                filePath);
+        }
+
+        return withLegacyVariables;
+    }
+
     /// <summary>
     /// Gets the scopes from the JWT token.
     /// </summary>

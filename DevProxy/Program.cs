@@ -3,6 +3,7 @@
 // See the LICENSE file in the project root for more information.
 
 using DevProxy;
+using DevProxy.Abstractions.Utils;
 using DevProxy.Commands;
 using DevProxy.Proxy;
 using DevProxy.State;
@@ -389,6 +390,12 @@ static WebApplication BuildApplication(
     });
 
     var app = builder.Build();
+
+    foreach (var provider in ((IConfigurationRoot)builder.Configuration).Providers.OfType<IEnvironmentVariablePlaceholderProvider>())
+    {
+        EnvironmentVariablePlaceholders.LogUnresolvedVariables(
+            app.Logger, provider.UnresolvedEnvironmentVariables, provider.Path ?? "configuration file");
+    }
 
     if (changedProxyVariables.Length > 0)
     {
