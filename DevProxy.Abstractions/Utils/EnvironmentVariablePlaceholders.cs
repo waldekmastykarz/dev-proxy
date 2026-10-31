@@ -3,10 +3,12 @@
 // See the LICENSE file in the project root for more information.
 
 using Microsoft.Extensions.Logging;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using YamlDotNet.RepresentationModel;
 
 namespace DevProxy.Abstractions.Utils;
 
@@ -41,49 +43,95 @@ public static partial class EnvironmentVariablePlaceholders
     /// <param name="value">Value to resolve.</param>
     /// <param name="lookup">Function that returns the value of a variable or null if it isn't set.</param>
     /// <param name="unresolvedVariables">Collects names of variables that couldn't be resolved.</param>
-    public static string Resolve(string value, Func<string, string?> lookup, ICollection<string>? unresolvedVariables = null)
+    public static string Resolve(string value, Func<string, string?> lookup, ICollection<string>? unresolvedVariables = null) =>
+        Resolve(value, lookup, unresolvedVariables, null);
+
+    /// <summary>
+    /// Resolves placeholders in a string value using the specified lookup.
+    /// </summary>
+    /// <param name="value">Value to resolve.</param>
+    /// <param name="lookup">Function that returns the value of a variable or null if it isn't set.</param>
+    /// <param name="unresolvedVariables">Collects names of variables that couldn't be resolved.</param>
+    /// <param name="transformText">Optional transformation applied only to the text outside placeholders.</param>
+    public static string Resolve(string value, Func<string, string?> lookup, ICollection<string>? unresolvedVariables, Func<string, string>? transformText)
     {
         ArgumentNullException.ThrowIfNull(value);
         ArgumentNullException.ThrowIfNull(lookup);
+
+        if (transformText is not null)
+        {
+            return ResolveWithTextTransform(value, lookup, unresolvedVariables, transformText);
+        }
 
         if (!value.Contains("${", StringComparison.Ordinal))
         {
             return value;
         }
 
-        return PlaceholderRegex().Replace(value, match =>
+        return PlaceholderRegex().Replace(value, match => ResolveMatch(match, lookup, unresolvedVariables));
+    }
+
+    private static string ResolveWithTextTransform(string value, Func<string, string?> lookup, ICollection<string>? unresolvedVariables, Func<string, string> transformText)
+    {
+        var result = new StringBuilder();
+        var position = 0;
+        foreach (Match match in PlaceholderRegex().Matches(value))
         {
-            var name = match.Groups["name"].Value;
-            if (match.Groups["escape"].Success)
-            {
-                // $${NAME} -> literal ${NAME}
-                return match.Value[1..];
-            }
+            _ = result
+                .Append(transformText(value[position..match.Index]))
+                .Append(ResolveMatch(match, lookup, unresolvedVariables));
+            position = match.Index + match.Length;
+        }
+        _ = result.Append(transformText(value[position..]));
+        return result.ToString();
+    }
 
-            var variableValue = lookup(name);
-            if (variableValue is null)
-            {
-                if (unresolvedVariables is not null && !unresolvedVariables.Contains(name))
-                {
-                    unresolvedVariables.Add(name);
-                }
-                return match.Value;
-            }
+    private static string ResolveMatch(Match match, Func<string, string?> lookup, ICollection<string>? unresolvedVariables)
+    {
+        var name = match.Groups["name"].Value;
+        if (match.Groups["escape"].Success)
+        {
+            // $${NAME} -> literal ${NAME}
+            return match.Value[1..];
+        }
 
-            return variableValue;
-        });
+        var variableValue = lookup(name);
+        if (variableValue is null)
+        {
+            if (unresolvedVariables is not null && !unresolvedVariables.Contains(name))
+            {
+                unresolvedVariables.Add(name);
+            }
+            return match.Value;
+        }
+
+        return variableValue;
     }
 
     /// <summary>
     /// Resolves placeholders in all string values of a JSON document. Property names aren't changed.
     /// Returns the original string if it doesn't contain any placeholders.
     /// </summary>
-    public static string ResolveInJson(string json, Func<string, string?> lookup, ICollection<string>? unresolvedVariables = null)
+    public static string ResolveInJson(string json, Func<string, string?> lookup, ICollection<string>? unresolvedVariables = null) =>
+        ResolveInJson(json, lookup, unresolvedVariables, null);
+
+    /// <summary>
+    /// Resolves placeholders in all string values of a JSON document. Property names aren't changed.
+    /// Returns the original string if no values changed.
+    /// </summary>
+    /// <param name="json">JSON document.</param>
+    /// <param name="lookup">Function that returns the value of a variable or null if it isn't set.</param>
+    /// <param name="unresolvedVariables">Collects names of variables that couldn't be resolved.</param>
+    /// <param name="transformText">Optional transformation applied only to the text outside placeholders.</param>
+    public static string ResolveInJson(string json, Func<string, string?> lookup, ICollection<string>? unresolvedVariables, Func<string, string>? transformText)
     {
         ArgumentNullException.ThrowIfNull(json);
         ArgumentNullException.ThrowIfNull(lookup);
 
-        if (!ContainsPlaceholder(json))
+        // string values may contain JSON escapes (eg. \u0024{NAME}) so only skip parsing when there are none
+        if (transformText is null &&
+            !ContainsPlaceholder(json) &&
+            !json.Contains("\\u", StringComparison.Ordinal))
         {
             return json;
         }
@@ -94,8 +142,14 @@ public static partial class EnvironmentVariablePlaceholders
             return json;
         }
 
-        node = ResolveInJsonNode(node, lookup, unresolvedVariables);
-        return node.ToJsonString(_writeOptions);
+        var changed = false;
+        node = ResolveInJsonNode(node, value =>
+        {
+            var resolved = Resolve(value, lookup, unresolvedVariables, transformText);
+            changed |= !string.Equals(value, resolved, StringComparison.Ordinal);
+            return resolved;
+        });
+        return changed ? node.ToJsonString(_writeOptions) : json;
     }
 
     /// <summary>
@@ -103,6 +157,77 @@ public static partial class EnvironmentVariablePlaceholders
     /// </summary>
     public static string ResolveInJson(string json, ICollection<string>? unresolvedVariables = null) =>
         ResolveInJson(json, Environment.GetEnvironmentVariable, unresolvedVariables);
+
+    /// <summary>
+    /// Resolves placeholders in all scalar values of a YAML document. Mapping keys aren't changed.
+    /// Returns the original string if no values changed.
+    /// </summary>
+    /// <param name="yaml">YAML document.</param>
+    /// <param name="lookup">Function that returns the value of a variable or null if it isn't set.</param>
+    /// <param name="unresolvedVariables">Collects names of variables that couldn't be resolved.</param>
+    /// <param name="transformText">Optional transformation applied only to the text outside placeholders.</param>
+    public static string ResolveInYaml(string yaml, Func<string, string?> lookup, ICollection<string>? unresolvedVariables = null, Func<string, string>? transformText = null)
+    {
+        ArgumentNullException.ThrowIfNull(yaml);
+        ArgumentNullException.ThrowIfNull(lookup);
+
+        var stream = new YamlStream();
+        using (var reader = new StringReader(yaml))
+        {
+            stream.Load(reader);
+        }
+
+        var changed = false;
+        var visited = new HashSet<YamlNode>(ReferenceEqualityComparer.Instance);
+        void resolveNode(YamlNode node)
+        {
+            // aliases point to the same node instance so each node is resolved once
+            if (!visited.Add(node))
+            {
+                return;
+            }
+
+            switch (node)
+            {
+                case YamlScalarNode scalar when scalar.Value is not null:
+                    var resolved = Resolve(scalar.Value, lookup, unresolvedVariables, transformText);
+                    if (!string.Equals(scalar.Value, resolved, StringComparison.Ordinal))
+                    {
+                        scalar.Value = resolved;
+                        changed = true;
+                    }
+                    break;
+                case YamlMappingNode mapping:
+                    foreach (var child in mapping.Children)
+                    {
+                        resolveNode(child.Value);
+                    }
+                    break;
+                case YamlSequenceNode sequence:
+                    foreach (var child in sequence.Children)
+                    {
+                        resolveNode(child);
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        foreach (var document in stream.Documents)
+        {
+            resolveNode(document.RootNode);
+        }
+
+        if (!changed)
+        {
+            return yaml;
+        }
+
+        using var writer = new StringWriter();
+        stream.Save(writer, assignAnchors: false);
+        return writer.ToString();
+    }
 
     /// <summary>
     /// Logs a warning for each environment variable that couldn't be resolved.
@@ -120,7 +245,7 @@ public static partial class EnvironmentVariablePlaceholders
         }
     }
 
-    private static JsonNode ResolveInJsonNode(JsonNode node, Func<string, string?> lookup, ICollection<string>? unresolvedVariables)
+    private static JsonNode ResolveInJsonNode(JsonNode node, Func<string, string> resolve)
     {
         switch (node)
         {
@@ -129,7 +254,7 @@ public static partial class EnvironmentVariablePlaceholders
                 {
                     if (property.Value is not null)
                     {
-                        var resolved = ResolveInJsonNode(property.Value, lookup, unresolvedVariables);
+                        var resolved = ResolveInJsonNode(property.Value, resolve);
                         if (!ReferenceEquals(resolved, property.Value))
                         {
                             obj[property.Key] = resolved;
@@ -143,7 +268,7 @@ public static partial class EnvironmentVariablePlaceholders
                     var item = array[i];
                     if (item is not null)
                     {
-                        var resolved = ResolveInJsonNode(item, lookup, unresolvedVariables);
+                        var resolved = ResolveInJsonNode(item, resolve);
                         if (!ReferenceEquals(resolved, item))
                         {
                             array[i] = resolved;
@@ -153,7 +278,7 @@ public static partial class EnvironmentVariablePlaceholders
                 return array;
             case JsonValue value when value.GetValueKind() == JsonValueKind.String:
                 var s = value.GetValue<string>();
-                var r = Resolve(s, lookup, unresolvedVariables);
+                var r = resolve(s);
                 return string.Equals(s, r, StringComparison.Ordinal) ? value : JsonValue.Create(r);
             default:
                 return node;

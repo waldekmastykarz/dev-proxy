@@ -87,9 +87,16 @@ public static class ConfigurationPlaceholderResolver
         ArgumentNullException.ThrowIfNull(data);
 
         var unresolved = new List<string>();
-        var overrides = environmentVariables is null
-            ? null
-            : new Dictionary<string, string>(environmentVariables, VariableNameComparer);
+        Dictionary<string, string>? overrides = null;
+        if (environmentVariables is not null)
+        {
+            overrides = new(VariableNameComparer);
+            // use the indexer so that names differing only in casing on Windows don't throw; last value wins
+            foreach (var (name, value) in environmentVariables)
+            {
+                overrides[name] = value;
+            }
+        }
 
         string? baseLookup(string name)
         {

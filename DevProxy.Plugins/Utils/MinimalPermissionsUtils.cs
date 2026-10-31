@@ -6,6 +6,7 @@ using DevProxy.Abstractions.Utils;
 using Microsoft.Extensions.Logging;
 using System.IdentityModel.Tokens.Jwt;
 using System.Text.Json;
+using YamlDotNet.Core;
 
 namespace DevProxy.Plugins.Utils;
 
@@ -18,30 +19,43 @@ static class MinimalPermissionsUtils
     public static string ResolveApiSpecVariables(string fileContents, string filePath, Dictionary<string, string> legacyVariables, ILogger logger)
     {
         var unresolvedVariables = new List<string>();
+        var usesLegacyVariables = false;
+
+        // legacy {NAME} variables are replaced only in text outside of ${NAME} placeholders
+        // so that escaped placeholders and resolved values aren't changed
+        string replaceLegacyVariables(string text)
+        {
+            var replaced = ProxyUtils.ReplaceVariables(text, legacyVariables, v => $"{{{v}}}");
+            usesLegacyVariables |= !string.Equals(text, replaced, StringComparison.Ordinal);
+            return replaced;
+        }
+        Func<string, string>? transformText = legacyVariables.Count > 0 ? replaceLegacyVariables : null;
+
         string resolved;
         try
         {
-            // resolve JSON at the value level so that values with quotes don't break the document
+            // resolve values in the parsed document so that values with quotes don't break it
+            // and keys aren't changed
             resolved = Path.GetExtension(filePath).Equals(".json", StringComparison.OrdinalIgnoreCase)
-                ? EnvironmentVariablePlaceholders.ResolveInJson(fileContents, unresolvedVariables)
-                : EnvironmentVariablePlaceholders.Resolve(fileContents, unresolvedVariables);
+                ? EnvironmentVariablePlaceholders.ResolveInJson(fileContents, Environment.GetEnvironmentVariable, unresolvedVariables, transformText)
+                : EnvironmentVariablePlaceholders.ResolveInYaml(fileContents, Environment.GetEnvironmentVariable, unresolvedVariables, transformText);
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or YamlException)
         {
             unresolvedVariables.Clear();
-            resolved = EnvironmentVariablePlaceholders.Resolve(fileContents, unresolvedVariables);
+            usesLegacyVariables = false;
+            resolved = EnvironmentVariablePlaceholders.Resolve(fileContents, Environment.GetEnvironmentVariable, unresolvedVariables, transformText);
         }
         EnvironmentVariablePlaceholders.LogUnresolvedVariables(logger, unresolvedVariables, filePath);
 
-        var withLegacyVariables = ProxyUtils.ReplaceVariables(resolved, legacyVariables, v => $"{{{v}}}");
-        if (!string.Equals(resolved, withLegacyVariables, StringComparison.Ordinal))
+        if (usesLegacyVariables)
         {
             logger.LogWarning(
                 "Referencing variables using {{NAME}} in {File} is deprecated and will be removed in a future version. Use ${{NAME}} instead",
                 filePath);
         }
 
-        return withLegacyVariables;
+        return resolved;
     }
 
     /// <summary>

@@ -83,4 +83,64 @@ public class EnvironmentVariablePlaceholdersTests
 
         Assert.Same(json, EnvironmentVariablePlaceholders.ResolveInJson(json, Lookup));
     }
+
+    [Fact]
+    public void ResolveInJson_ResolvesUnicodeEscapedPlaceholders()
+    {
+        var json = """{ "audience": "\u0024{CLIENT_ID}" }""";
+
+        var result = EnvironmentVariablePlaceholders.ResolveInJson(json, Lookup);
+
+        using var doc = JsonDocument.Parse(result);
+        Assert.Equal("1234", doc.RootElement.GetProperty("audience").GetString());
+    }
+
+    [Fact]
+    public void ResolveInJson_ReturnsOriginalWhenEscapesWithoutPlaceholders()
+    {
+        var json = """{ "a": "\u00e9" }""";
+
+        Assert.Same(json, EnvironmentVariablePlaceholders.ResolveInJson(json, Lookup));
+    }
+
+    [Fact]
+    public void ResolveInYaml_ResolvesScalarValuesOnly()
+    {
+        var yaml = """
+        ${TENANT_ID}: "${TENANT_ID}"
+        quoted: "${QUOTED}"
+        base: &base
+          id: ${CLIENT_ID}
+        copy: *base
+        """;
+
+        var result = EnvironmentVariablePlaceholders.ResolveInYaml(yaml, Lookup);
+
+        var stream = new YamlDotNet.RepresentationModel.YamlStream();
+        stream.Load(new StringReader(result));
+        var root = (YamlDotNet.RepresentationModel.YamlMappingNode)stream.Documents[0].RootNode;
+        Assert.Equal("contoso", root["${TENANT_ID}"].ToString());
+        Assert.Equal("a \"quoted\" \\ value", root["quoted"].ToString());
+        Assert.Equal("1234", ((YamlDotNet.RepresentationModel.YamlMappingNode)root["copy"])["id"].ToString());
+    }
+
+    [Fact]
+    public void ResolveInYaml_ReturnsOriginalWhenNoPlaceholders()
+    {
+        var yaml = "a: b # keep";
+
+        Assert.Same(yaml, EnvironmentVariablePlaceholders.ResolveInYaml(yaml, Lookup));
+    }
+
+    [Fact]
+    public void Resolve_TransformsOnlyTextOutsidePlaceholders()
+    {
+        var result = EnvironmentVariablePlaceholders.Resolve(
+            "{TENANT_ID} $${TENANT_ID} ${CLIENT_ID} ${MISSING}",
+            name => name == "CLIENT_ID" ? "{TENANT_ID}" : Lookup(name),
+            null,
+            text => text.Replace("{TENANT_ID}", "legacy", StringComparison.Ordinal));
+
+        Assert.Equal("legacy ${TENANT_ID} {TENANT_ID} ${MISSING}", result);
+    }
 }

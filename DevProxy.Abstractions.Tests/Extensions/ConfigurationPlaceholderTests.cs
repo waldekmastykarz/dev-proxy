@@ -67,6 +67,18 @@ public sealed class ConfigurationPlaceholderTests : IDisposable
     }
 
     [Fact]
+    public void AddConfigFile_CliVariablesDifferingInCasing_LastValueWins()
+    {
+        var path = Write("devproxyrc.json", """
+        { "value": "${NAME}" }
+        """);
+
+        var (config, _) = Build(path, new Dictionary<string, string> { ["NAME"] = "first", ["name"] = "second" });
+
+        Assert.Equal(OperatingSystem.IsWindows() ? "second" : "first", config["value"]);
+    }
+
+    [Fact]
     public void AddConfigFile_Yaml_ResolvesPlaceholders()
     {
         var path = Write("devproxyrc.yaml", $$"""
