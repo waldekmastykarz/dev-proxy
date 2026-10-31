@@ -23,7 +23,7 @@ internal sealed record SchemaValidationError(string Path, string Message, string
 /// Lightweight validator of JSON values against OpenAPI schemas
 /// (Microsoft.OpenApi object model). Supports: type (incl. nullable / type null),
 /// required, properties, additionalProperties, items, enum, allOf, anyOf, oneOf
-/// and $ref. Other keywords (format, min/max, pattern, etc.) are ignored.
+/// (incl. discriminator) and $ref. Other keywords (format, min/max, pattern, etc.) are ignored.
 /// </summary>
 internal static class OpenApiSchemaValidator
 {
@@ -359,7 +359,13 @@ internal static class OpenApiSchemaValidator
             errors.Add(new(path, "Value doesn't match any of the schemas in 'anyOf'"));
         }
 
-        if (schema.OneOf is { Count: > 0 })
+        if (schema.OneOf is { Count: > 0 } &&
+            schema.Discriminator?.PropertyName is { Length: > 0 } &&
+            value.ValueKind == JsonValueKind.Object)
+        {
+            ValidateDiscriminatedOneOf(value, schema, schema.Discriminator, direction, path, errors, firstError, state, depth);
+        }
+        else if (schema.OneOf is { Count: > 0 })
         {
             var matches = schema.OneOf.Count(s => IsValid(value, s, direction, path, state, depth));
             if (matches == 0)
@@ -372,6 +378,83 @@ internal static class OpenApiSchemaValidator
             }
         }
     }
+
+    // Validates the value only against the oneOf branch selected by the
+    // discriminator, so that overlapping branches don't cause false positives
+    private static void ValidateDiscriminatedOneOf(
+        JsonElement value,
+        IOpenApiSchema schema,
+        OpenApiDiscriminator discriminator,
+        SchemaValidationDirection direction,
+        string path,
+        List<SchemaValidationError> errors,
+        int firstError,
+        ValidationState state,
+        int depth)
+    {
+        var propertyName = discriminator.PropertyName!;
+        IOpenApiSchema? selected;
+        if (!value.TryGetProperty(propertyName, out var discriminatorValue))
+        {
+            selected = discriminator.DefaultMapping;
+            if (selected is null)
+            {
+                errors.Add(new(path, $"Missing discriminator property '{propertyName}' required to select a schema in 'oneOf'"));
+                return;
+            }
+        }
+        else if (discriminatorValue.ValueKind != JsonValueKind.String)
+        {
+            errors.Add(new(GetPropertyPath(path, propertyName), $"Discriminator property '{propertyName}' must be a string but got {DescribeValueKind(discriminatorValue)}"));
+            return;
+        }
+        else
+        {
+            var discriminatorName = discriminatorValue.GetString()!;
+            selected = FindDiscriminatedSchema(schema.OneOf!, discriminator, discriminatorName) ?? discriminator.DefaultMapping;
+            if (selected is null)
+            {
+                var allowed = GetDiscriminatorValues(schema.OneOf!, discriminator);
+                var allowedMessage = allowed.Count > 0
+                    ? $". Allowed values: {string.Join(", ", allowed.Select(v => $"'{v}'"))}"
+                    : string.Empty;
+                errors.Add(new(GetPropertyPath(path, propertyName), $"Discriminator value '{discriminatorName}' doesn't map to any schema in 'oneOf'{allowedMessage}"));
+                return;
+            }
+        }
+
+        var seen = new HashSet<SchemaValidationError>(errors.Skip(firstError));
+        foreach (var error in ValidateComposed(value, selected, direction, path, state, depth + 1))
+        {
+            if (seen.Add(error))
+            {
+                errors.Add(error);
+            }
+        }
+    }
+
+    // Explicit mappings take precedence over implicit ones, which use
+    // the name of the referenced component schema
+    private static IOpenApiSchema? FindDiscriminatedSchema(IList<IOpenApiSchema> oneOf, OpenApiDiscriminator discriminator, string discriminatorValue)
+    {
+        if (discriminator.Mapping is not null &&
+            discriminator.Mapping.TryGetValue(discriminatorValue, out var mapped))
+        {
+            return mapped.Target is not null
+                ? mapped
+                : oneOf.FirstOrDefault(s => GetSchemaName(s) == mapped.Reference?.Id);
+        }
+
+        return oneOf.FirstOrDefault(s => GetSchemaName(s) == discriminatorValue);
+    }
+
+    private static List<string> GetDiscriminatorValues(IList<IOpenApiSchema> oneOf, OpenApiDiscriminator discriminator) =>
+        [.. (discriminator.Mapping?.Keys ?? Enumerable.Empty<string>())
+            .Concat(oneOf.Select(GetSchemaName).OfType<string>())
+            .Distinct(StringComparer.Ordinal)];
+
+    private static string? GetSchemaName(IOpenApiSchema schema) =>
+        schema is OpenApiSchemaReference reference ? reference.Reference?.Id : null;
 
     private static bool IsValid(JsonElement value, IOpenApiSchema schema, SchemaValidationDirection direction, string path, ValidationState state, int depth) =>
         ValidateComposed(value, schema, direction, path, state, depth + 1).Count == 0;
