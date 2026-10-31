@@ -4,7 +4,6 @@
 
 using System.Diagnostics;
 using System.Security.Cryptography.X509Certificates;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace DevProxy.Proxy;
 
@@ -27,7 +26,26 @@ internal sealed record LinuxTrustStore(
 internal enum LinuxTrustResult
 {
     Trusted,
+    /// <summary>The system store trusts the certificate, but NSS-based apps don't.</summary>
+    TrustedSystemOnly,
     Skipped,
+    Failed,
+}
+
+internal enum CommandOutcome
+{
+    Succeeded,
+    /// <summary>sudo needed a password and couldn't prompt for it.</summary>
+    PasswordRequired,
+    Failed,
+}
+
+internal enum SystemTrustOutcome
+{
+    Trusted,
+    Skipped,
+    /// <summary>Skipped, but the anchor file was added and couldn't be removed again.</summary>
+    SkippedAnchorLeft,
     Failed,
 }
 
@@ -189,11 +207,50 @@ internal static class LinuxCertificateHelper
     }
 
     /// <summary>
-    /// Without a terminal, sudo can't prompt for a password. If it also isn't allowed to run
-    /// without one (e.g. a restricted sudoers grant), skip trusting instead of failing.
+    /// Runs the trust commands in order. If sudo needs a password it can't prompt for, nothing
+    /// is trusted: when the anchor was already installed, it's removed again with
+    /// <paramref name="rollback"/> (null when there's nothing to undo).
     /// </summary>
-    internal static bool ShouldSkipTrust(bool isRoot, bool isInteractive, Func<bool> canSudoWithoutPassword) =>
-        !isRoot && !isInteractive && !canSudoWithoutPassword();
+    internal static SystemTrustOutcome TrustSystemStore(
+        IReadOnlyList<LinuxCommand> commands, LinuxCommand? rollback, Func<LinuxCommand, CommandOutcome> run)
+    {
+        for (var i = 0; i < commands.Count; i++)
+        {
+            switch (run(commands[i]))
+            {
+                case CommandOutcome.Succeeded:
+                    continue;
+                case CommandOutcome.PasswordRequired:
+                    if (i == 0 || rollback is null)
+                    {
+                        return SystemTrustOutcome.Skipped;
+                    }
+                    return run(rollback) == CommandOutcome.Succeeded
+                        ? SystemTrustOutcome.Skipped
+                        : SystemTrustOutcome.SkippedAnchorLeft;
+                case CommandOutcome.Failed:
+                default:
+                    return SystemTrustOutcome.Failed;
+            }
+        }
+        return SystemTrustOutcome.Trusted;
+    }
+
+    internal static CommandOutcome RunAll(IEnumerable<LinuxCommand> commands, Func<LinuxCommand, CommandOutcome> run)
+    {
+        foreach (var command in commands)
+        {
+            var outcome = run(command);
+            if (outcome != CommandOutcome.Succeeded)
+            {
+                return outcome;
+            }
+        }
+        return CommandOutcome.Succeeded;
+    }
+
+    internal static bool IsPasswordRequired(string stderr) =>
+        stderr.Contains("a password is required", StringComparison.OrdinalIgnoreCase);
 
     internal static LinuxTrustStore? DetectTrustStore() => DetectTrustStore(Directory.Exists, FindSystemExecutable);
 
@@ -210,12 +267,10 @@ internal static class LinuxCertificateHelper
             var (isRoot, isInteractive) = GetContext();
             var removeLegacy = FileContainsCertificate(store.LegacyCertificatePath, certificate);
             var commands = GetTrustCommands(store, pemFilePath, removeLegacy);
-            if (ShouldSkipTrust(isRoot, isInteractive, () => commands.All(CanSudoWithoutPassword)))
-            {
-                logger.LogWarning(
-                    "Skipped trusting the Dev Proxy root certificate because sudo needs a password and there's no terminal to ask for it. To trust the certificate, run 'devproxy cert ensure' in an interactive terminal.");
-                return LinuxTrustResult.Skipped;
-            }
+            // Undo the anchor install only if it changed something.
+            LinuxCommand? rollback = FileContainsCertificate(store.CertificatePath, certificate)
+                ? null
+                : new("rm", ["-f", store.CertificatePath]);
 
             logger.LogInformation(
                 "Adding the Dev Proxy root certificate to the {Distro} system certificate store ({Path}).{SudoHint}",
@@ -223,21 +278,28 @@ internal static class LinuxCertificateHelper
                 store.CertificatePath,
                 isRoot ? string.Empty : " You might be asked for your password.");
 
-            foreach (var command in commands)
+            switch (TrustSystemStore(commands, rollback, c => RunElevated(c, isRoot, isInteractive, logger)))
             {
-                if (!RunElevated(command, isRoot, isInteractive, logger))
-                {
-                    if (!isRoot && !isInteractive)
-                    {
-                        logger.LogError("If sudo requires a password, run 'devproxy cert ensure' in an interactive terminal.");
-                    }
+                case SystemTrustOutcome.Skipped:
+                    logger.LogWarning(
+                        "Skipped trusting the Dev Proxy root certificate because sudo needs a password and there's no terminal to ask for it. To trust the certificate, run 'devproxy cert ensure' in an interactive terminal.");
+                    return LinuxTrustResult.Skipped;
+                case SystemTrustOutcome.SkippedAnchorLeft:
+                    logger.LogWarning(
+                        "Skipped trusting the Dev Proxy root certificate because sudo needs a password and there's no terminal to ask for it. The certificate file {Path} was added but isn't active, and couldn't be removed. To finish trusting it, run 'devproxy cert ensure' in an interactive terminal. To remove it, run 'sudo rm {Path}'.",
+                        store.CertificatePath, store.CertificatePath);
+                    return LinuxTrustResult.Skipped;
+                case SystemTrustOutcome.Failed:
                     return LinuxTrustResult.Failed;
-                }
+                case SystemTrustOutcome.Trusted:
+                default:
+                    break;
             }
             logger.LogInformation("Certificate added to the system certificate store.");
 
-            TrustInNssDatabase(pemFilePath, logger);
-            return LinuxTrustResult.Trusted;
+            return TrustInNssDatabase(pemFilePath, logger)
+                ? LinuxTrustResult.Trusted
+                : LinuxTrustResult.TrustedSystemOnly;
         }
         finally
         {
@@ -245,8 +307,10 @@ internal static class LinuxCertificateHelper
         }
     }
 
-    internal static void RemoveTrustedCertificate(X509Certificate2 certificate, ILogger logger)
+    /// <summary>Returns false when the system store still trusts the certificate.</summary>
+    internal static bool RemoveTrustedCertificate(X509Certificate2 certificate, ILogger logger)
     {
+        var removed = true;
         var store = DetectTrustStore();
         var removeLegacy = store is not null && FileContainsCertificate(store.LegacyCertificatePath, certificate);
         if (store is null)
@@ -264,50 +328,79 @@ internal static class LinuxCertificateHelper
                 store.CertificatePath,
                 isRoot ? string.Empty : " You might be asked for your password.");
 
-            var removed = true;
-            foreach (var command in GetUntrustCommands(store, removeLegacy))
-            {
-                if (!RunElevated(command, isRoot, isInteractive, logger))
-                {
-                    removed = false;
-                    break;
-                }
-            }
-            if (removed)
+            var outcome = RunAll(GetUntrustCommands(store, removeLegacy), c => RunElevated(c, isRoot, isInteractive, logger));
+            if (outcome == CommandOutcome.Succeeded)
             {
                 logger.LogInformation("Certificate removed from the system certificate store.");
+            }
+            else
+            {
+                removed = false;
+                logger.LogError(
+                    "The system certificate store still trusts the Dev Proxy root certificate{Reason}. To finish removing it, run 'devproxy cert remove' in an interactive terminal.",
+                    outcome == CommandOutcome.PasswordRequired ? " because sudo needs a password and there's no terminal to ask for it" : string.Empty);
             }
         }
 
         RemoveFromNssDatabase(logger);
+        return removed;
     }
 
-    private static void TrustInNssDatabase(string pemFilePath, ILogger logger)
+    /// <summary>Returns false when certutil is available but couldn't add the certificate.</summary>
+    private static bool TrustInNssDatabase(string pemFilePath, ILogger logger)
     {
         var certutil = FindCertutil();
         if (certutil is null)
         {
             logger.LogInformation(
                 "To have Chrome and other NSS-based apps trust the certificate, install certutil (libnss3-tools on Debian/Ubuntu, nss-tools on Fedora/RHEL, nss on Arch) and run 'devproxy cert ensure' again.");
-            return;
+            return true;
         }
 
         var nssDir = GetNssDatabaseDirectory();
         var db = $"sql:{nssDir}";
+        string error;
         if (!Directory.Exists(nssDir))
         {
             _ = Directory.CreateDirectory(nssDir);
-            if (!Run(new(certutil, ["-N", "-d", db, "--empty-password"]), logger, redirectOutput: true))
+            error = Execute(new(certutil, ["-N", "-d", db, "--empty-password"]), redirectOutput: true).Error;
+            if (error.Length > 0)
             {
-                return;
+                LogNssTrustFailure(logger, nssDir, error, leftoverEntry: false);
+                return false;
             }
         }
 
         // Replace any previous Dev Proxy root (it's regenerated per machine) so re-runs are idempotent.
         _ = Run(new(certutil, ["-D", "-d", db, "-n", NssNickname]), logger, redirectOutput: true, logFailure: false);
-        if (Run(new(certutil, ["-A", "-d", db, "-n", NssNickname, "-t", "C,,", "-i", pemFilePath]), logger, redirectOutput: true))
+        error = Execute(new(certutil, ["-A", "-d", db, "-n", NssNickname, "-t", "C,,", "-i", pemFilePath]), redirectOutput: true).Error;
+        if (error.Length == 0)
         {
             logger.LogInformation("Certificate added to the NSS database ({Path}).", nssDir);
+            return true;
+        }
+
+        // A failed add can leave an entry without trust flags behind; try to remove it.
+        var leftoverEntry =
+            Run(new(certutil, ["-L", "-d", db, "-n", NssNickname]), logger, redirectOutput: true, logFailure: false) &&
+            !Run(new(certutil, ["-D", "-d", db, "-n", NssNickname]), logger, redirectOutput: true, logFailure: false);
+        LogNssTrustFailure(logger, nssDir, error, leftoverEntry);
+        return false;
+    }
+
+    internal static string FormatToolError(string error) =>
+        string.Join(' ', error.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)).TrimEnd('.');
+
+    private static void LogNssTrustFailure(ILogger logger, string nssDir, string error, bool leftoverEntry)
+    {
+        logger.LogWarning(
+            "The system certificate store trusts the Dev Proxy root certificate, but Chrome and other NSS-based apps don't: couldn't add it to the NSS database ({Path}): {Error}. If the database has a password, run 'devproxy cert ensure' in an interactive terminal. Otherwise, check that you can write to it.",
+            nssDir, FormatToolError(error));
+        if (leftoverEntry)
+        {
+            logger.LogWarning(
+                "The NSS database still has a '{Nickname}' entry that couldn't be removed. Remove it with: certutil -D -d sql:{Path} -n \"{Nickname}\"",
+                NssNickname, nssDir, NssNickname);
         }
     }
 
@@ -384,23 +477,28 @@ internal static class LinuxCertificateHelper
         (Environment.UserName == "root",
          !Console.IsInputRedirected && Environment.GetEnvironmentVariable("CI") is null);
 
-    // 'sudo -n -l <command>' checks that sudo allows this exact command without a password,
-    // without running it, so command-scoped sudoers grants are honored.
-    internal static LinuxCommand GetSudoCheckCommand(LinuxCommand command) =>
-        new("sudo", ["-n", "-l", "--", command.FileName, .. command.Arguments]);
-
-    private static bool CanSudoWithoutPassword(LinuxCommand command) =>
-        Run(GetSudoCheckCommand(command), NullLogger.Instance, redirectOutput: true, logFailure: false);
-
-    private static bool RunElevated(LinuxCommand command, bool isRoot, bool isInteractive, ILogger logger)
+    private static CommandOutcome RunElevated(LinuxCommand command, bool isRoot, bool isInteractive, ILogger logger)
     {
         var elevated = Elevate(command, isRoot, isInteractive);
         if (elevated is null)
         {
             logger.LogError("Couldn't find {Command} in {Directories}.", command.FileName, string.Join(", ", _systemDirectories));
-            return false;
+            return CommandOutcome.Failed;
         }
-        return Run(elevated, logger, redirectOutput: false);
+
+        // Without a terminal (sudo -n), capture stderr to tell a missing password from other failures.
+        var captureError = !isRoot && !isInteractive;
+        var (succeeded, error) = Execute(elevated, redirectOutput: captureError);
+        if (succeeded)
+        {
+            return CommandOutcome.Succeeded;
+        }
+        if (captureError && IsPasswordRequired(error))
+        {
+            return CommandOutcome.PasswordRequired;
+        }
+        logger.LogError("Command '{Command}' failed{Error}", elevated, error.Length > 0 ? $": {error}" : ".");
+        return CommandOutcome.Failed;
     }
 
     // When running as root, don't pick up certutil from PATH, which might be user-writable.
@@ -430,6 +528,20 @@ internal static class LinuxCertificateHelper
 
     private static bool Run(LinuxCommand command, ILogger logger, bool redirectOutput, bool logFailure = true)
     {
+        var (succeeded, error) = Execute(command, redirectOutput);
+        if (!succeeded && logFailure)
+        {
+            logger.LogError("Command '{Command}' failed{Error}", command, error.Length > 0 ? $": {error}" : ".");
+        }
+        return succeeded;
+    }
+
+    /// <summary>
+    /// Runs the command. On failure, Error has the captured stderr (when redirected), the exit
+    /// code, or why it couldn't start; it's empty on success.
+    /// </summary>
+    private static (bool Succeeded, string Error) Execute(LinuxCommand command, bool redirectOutput)
+    {
         var startInfo = new ProcessStartInfo
         {
             FileName = command.FileName,
@@ -441,6 +553,11 @@ internal static class LinuxCertificateHelper
         foreach (var argument in command.Arguments)
         {
             startInfo.ArgumentList.Add(argument);
+        }
+        if (redirectOutput)
+        {
+            // Untranslated messages, so failures like sudo's "a password is required" can be detected.
+            startInfo.Environment["LC_ALL"] = "C";
         }
 
         try
@@ -459,31 +576,16 @@ internal static class LinuxCertificateHelper
             }
             process.WaitForExit();
 
-            if (process.ExitCode != 0)
+            if (process.ExitCode == 0)
             {
-                if (logFailure)
-                {
-                    var error = stderr.ToString().Trim();
-                    if (error.Length > 0)
-                    {
-                        logger.LogError("Command '{Command}' failed with exit code {ExitCode}: {Error}", command, process.ExitCode, error);
-                    }
-                    else
-                    {
-                        logger.LogError("Command '{Command}' failed with exit code {ExitCode}.", command, process.ExitCode);
-                    }
-                }
-                return false;
+                return (true, string.Empty);
             }
-            return true;
+            var error = stderr.ToString().Trim();
+            return (false, error.Length > 0 ? error : $"exit code {process.ExitCode}");
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
         {
-            if (logFailure)
-            {
-                logger.LogError(ex, "Couldn't run '{Command}'", command);
-            }
-            return false;
+            return (false, ex.Message);
         }
     }
 

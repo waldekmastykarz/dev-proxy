@@ -106,6 +106,7 @@ internal sealed class RootCertificateTrust(
                 case LinuxTrustResult.Trusted:
                     logger.LogInformation("Certificate trusted successfully.");
                     break;
+                case LinuxTrustResult.TrustedSystemOnly:
                 case LinuxTrustResult.Skipped:
                 default:
                     break;
@@ -133,7 +134,10 @@ internal sealed class RootCertificateTrust(
         }
         else if (OperatingSystem.IsLinux())
         {
-            LinuxCertificateHelper.RemoveTrustedCertificate(rootCertificate, logger);
+            if (!LinuxCertificateHelper.RemoveTrustedCertificate(rootCertificate, logger))
+            {
+                throw new InvalidOperationException("Failed to remove the root certificate from the system certificate store.");
+            }
         }
         else
         {

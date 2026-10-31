@@ -108,7 +108,7 @@ Trust the certificate (requires sudo, so Dev Proxy doesn't do it automatically o
 devproxy cert ensure
 ```
 
-This adds the certificate to the system certificate store on Debian/Ubuntu (`update-ca-certificates`), Fedora/RHEL and Arch (`update-ca-trust`). If `certutil` is installed (`libnss3-tools` on Debian/Ubuntu, `nss-tools` on Fedora/RHEL, `nss` on Arch), it also adds it to the NSS database used by Chrome (`~/.pki/nssdb` if it exists, otherwise `~/.local/share/pki/nssdb`). Without a terminal, if sudo needs a password, `cert ensure` creates the certificate but skips trusting it and shows a warning. To undo, run `devproxy cert remove`, which also removes the certificate from both NSS databases.
+This adds the certificate to the system certificate store on Debian/Ubuntu (`update-ca-certificates`), Fedora/RHEL and Arch (`update-ca-trust`). If `certutil` is installed (`libnss3-tools` on Debian/Ubuntu, `nss-tools` on Fedora/RHEL, `nss` on Arch), it also adds it to the NSS database used by Chrome (`~/.pki/nssdb` if it exists, otherwise `~/.local/share/pki/nssdb`). Without a terminal, if sudo needs a password, `cert ensure` creates the certificate but skips trusting it and shows a warning. If the system store is trusted but the NSS step fails (for example, the database has a password), it shows a warning. To undo, run `devproxy cert remove`, which also removes the certificate from both NSS databases. If it can't update the system store (for example, sudo needs a password and there's no terminal), it exits with an error.
 
 On other distributions, `cert ensure` saves the public certificate to `devproxy-ca.crt` in the current directory; add it to your system's CA anchors. To do it fully by hand, for example on Ubuntu:
 

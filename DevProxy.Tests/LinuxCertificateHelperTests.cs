@@ -146,27 +146,124 @@ public class LinuxCertificateHelperTests
             LinuxCertificateHelper.GetNssDatabaseDirectory("/home/u", Directories()));
     }
 
-    [Theory]
-    [InlineData(false, false, false, true)]
-    [InlineData(false, false, true, false)]
-    [InlineData(false, true, false, false)]
-    [InlineData(true, false, false, false)]
-    public void ShouldSkipTrust_OnlyWhenSudoCantRunWithoutPrompt(bool isRoot, bool isInteractive, bool canSudo, bool expected)
-    {
-        var probed = false;
-        var skip = LinuxCertificateHelper.ShouldSkipTrust(isRoot, isInteractive, () => { probed = true; return canSudo; });
+    private static readonly LinuxCommand _install = new("install", ["a", "b"]);
+    private static readonly LinuxCommand _refresh = new("update-ca-certificates", []);
+    private static readonly LinuxCommand _rollback = new("rm", ["-f", "b"]);
 
-        Assert.Equal(expected, skip);
-        Assert.Equal(!isRoot && !isInteractive, probed);
+    private static Func<LinuxCommand, CommandOutcome> Outcomes(List<LinuxCommand> ran, params (LinuxCommand Command, CommandOutcome Outcome)[] outcomes) =>
+        c =>
+        {
+            ran.Add(c);
+            foreach (var (command, outcome) in outcomes)
+            {
+                if (command == c)
+                {
+                    return outcome;
+                }
+            }
+            return CommandOutcome.Succeeded;
+        };
+
+    [Fact]
+    public void TrustSystemStore_AllSucceed_Trusted()
+    {
+        List<LinuxCommand> ran = [];
+
+        var outcome = LinuxCertificateHelper.TrustSystemStore([_install, _refresh], _rollback, Outcomes(ran));
+
+        Assert.Equal(SystemTrustOutcome.Trusted, outcome);
+        Assert.Equal([_install, _refresh], ran);
     }
 
     [Fact]
-    public void GetSudoCheckCommand_ListsExactCommandWithoutPrompt()
+    public void TrustSystemStore_FirstNeedsPassword_SkipsWithoutChanges()
     {
-        var check = LinuxCertificateHelper.GetSudoCheckCommand(new("install", ["-m", "0644", "a", "b"]));
+        List<LinuxCommand> ran = [];
 
-        Assert.Equal("sudo", check.FileName);
-        Assert.Equal(["-n", "-l", "--", "install", "-m", "0644", "a", "b"], check.Arguments);
+        var outcome = LinuxCertificateHelper.TrustSystemStore(
+            [_install, _refresh], _rollback, Outcomes(ran, (_install, CommandOutcome.PasswordRequired)));
+
+        Assert.Equal(SystemTrustOutcome.Skipped, outcome);
+        Assert.Equal([_install], ran);
+    }
+
+    [Fact]
+    public void TrustSystemStore_RefreshNeedsPassword_RemovesAnchorAndSkips()
+    {
+        List<LinuxCommand> ran = [];
+
+        var outcome = LinuxCertificateHelper.TrustSystemStore(
+            [_install, _refresh], _rollback, Outcomes(ran, (_refresh, CommandOutcome.PasswordRequired)));
+
+        Assert.Equal(SystemTrustOutcome.Skipped, outcome);
+        Assert.Equal([_install, _refresh, _rollback], ran);
+    }
+
+    [Fact]
+    public void TrustSystemStore_RollbackNeedsPassword_ReportsAnchorLeft()
+    {
+        List<LinuxCommand> ran = [];
+
+        var outcome = LinuxCertificateHelper.TrustSystemStore(
+            [_install, _refresh], _rollback,
+            Outcomes(ran, (_refresh, CommandOutcome.PasswordRequired), (_rollback, CommandOutcome.PasswordRequired)));
+
+        Assert.Equal(SystemTrustOutcome.SkippedAnchorLeft, outcome);
+    }
+
+    [Fact]
+    public void TrustSystemStore_NothingToUndo_SkipsWithoutRollback()
+    {
+        List<LinuxCommand> ran = [];
+
+        var outcome = LinuxCertificateHelper.TrustSystemStore(
+            [_install, _refresh], rollback: null, Outcomes(ran, (_refresh, CommandOutcome.PasswordRequired)));
+
+        Assert.Equal(SystemTrustOutcome.Skipped, outcome);
+        Assert.Equal([_install, _refresh], ran);
+    }
+
+    [Fact]
+    public void TrustSystemStore_OtherFailure_Fails()
+    {
+        List<LinuxCommand> ran = [];
+
+        var outcome = LinuxCertificateHelper.TrustSystemStore(
+            [_install, _refresh], _rollback, Outcomes(ran, (_refresh, CommandOutcome.Failed)));
+
+        Assert.Equal(SystemTrustOutcome.Failed, outcome);
+        Assert.Equal([_install, _refresh], ran);
+    }
+
+    [Fact]
+    public void RunAll_StopsAtFirstFailureAndReportsIt()
+    {
+        List<LinuxCommand> ran = [];
+
+        var outcome = LinuxCertificateHelper.RunAll(
+            [_rollback, _refresh, _install], Outcomes(ran, (_refresh, CommandOutcome.PasswordRequired)));
+
+        Assert.Equal(CommandOutcome.PasswordRequired, outcome);
+        Assert.Equal([_rollback, _refresh], ran);
+    }
+
+    [Theory]
+    [InlineData("sudo: a password is required", true)]
+    [InlineData("rm: cannot remove 'x': Read-only file system", false)]
+    [InlineData("", false)]
+    public void IsPasswordRequired_DetectsSudoMessage(string stderr, bool expected)
+    {
+        Assert.Equal(expected, LinuxCertificateHelper.IsPasswordRequired(stderr));
+    }
+
+    [Fact]
+    public void FormatToolError_JoinsLinesAndDropsTrailingPeriods()
+    {
+        var error = "Error opening input terminal for read\ncertutil: could not change trust: SEC_ERROR_TOKEN_NOT_LOGGED_IN: The token is not logged in..\n";
+
+        Assert.Equal(
+            "Error opening input terminal for read certutil: could not change trust: SEC_ERROR_TOKEN_NOT_LOGGED_IN: The token is not logged in",
+            LinuxCertificateHelper.FormatToolError(error));
     }
 
     [Fact]
