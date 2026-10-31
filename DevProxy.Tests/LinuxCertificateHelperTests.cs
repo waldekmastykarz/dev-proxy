@@ -161,6 +161,15 @@ public class LinuxCertificateHelperTests
     }
 
     [Fact]
+    public void GetSudoCheckCommand_ListsExactCommandWithoutPrompt()
+    {
+        var check = LinuxCertificateHelper.GetSudoCheckCommand(new("install", ["-m", "0644", "a", "b"]));
+
+        Assert.Equal("sudo", check.FileName);
+        Assert.Equal(["-n", "-l", "--", "install", "-m", "0644", "a", "b"], check.Arguments);
+    }
+
+    [Fact]
     public void FindSystemExecutable_IgnoresPath()
     {
         var dir = Directory.CreateTempSubdirectory();

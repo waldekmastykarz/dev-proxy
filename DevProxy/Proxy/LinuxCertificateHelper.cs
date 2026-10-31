@@ -199,14 +199,6 @@ internal static class LinuxCertificateHelper
 
     internal static LinuxTrustResult TrustCertificate(X509Certificate2 certificate, LinuxTrustStore store, ILogger logger)
     {
-        var (isRoot, isInteractive) = GetContext();
-        if (ShouldSkipTrust(isRoot, isInteractive, CanSudoWithoutPassword))
-        {
-            logger.LogWarning(
-                "Skipped trusting the Dev Proxy root certificate because sudo needs a password and there's no terminal to ask for it. To trust the certificate, run 'devproxy cert ensure' in an interactive terminal.");
-            return LinuxTrustResult.Skipped;
-        }
-
         var pemFilePath = ExportCertificateToPem(certificate, logger);
         if (pemFilePath is null)
         {
@@ -215,14 +207,23 @@ internal static class LinuxCertificateHelper
 
         try
         {
+            var (isRoot, isInteractive) = GetContext();
+            var removeLegacy = FileContainsCertificate(store.LegacyCertificatePath, certificate);
+            var commands = GetTrustCommands(store, pemFilePath, removeLegacy);
+            if (ShouldSkipTrust(isRoot, isInteractive, () => commands.All(CanSudoWithoutPassword)))
+            {
+                logger.LogWarning(
+                    "Skipped trusting the Dev Proxy root certificate because sudo needs a password and there's no terminal to ask for it. To trust the certificate, run 'devproxy cert ensure' in an interactive terminal.");
+                return LinuxTrustResult.Skipped;
+            }
+
             logger.LogInformation(
                 "Adding the Dev Proxy root certificate to the {Distro} system certificate store ({Path}).{SudoHint}",
                 store.Name,
                 store.CertificatePath,
                 isRoot ? string.Empty : " You might be asked for your password.");
 
-            var removeLegacy = FileContainsCertificate(store.LegacyCertificatePath, certificate);
-            foreach (var command in GetTrustCommands(store, pemFilePath, removeLegacy))
+            foreach (var command in commands)
             {
                 if (!RunElevated(command, isRoot, isInteractive, logger))
                 {
@@ -335,8 +336,13 @@ internal static class LinuxCertificateHelper
         (Environment.UserName == "root",
          !Console.IsInputRedirected && Environment.GetEnvironmentVariable("CI") is null);
 
-    private static bool CanSudoWithoutPassword() =>
-        Run(new("sudo", ["-n", "true"]), NullLogger.Instance, redirectOutput: true, logFailure: false);
+    // 'sudo -n -l <command>' checks that sudo allows this exact command without a password,
+    // without running it, so command-scoped sudoers grants are honored.
+    internal static LinuxCommand GetSudoCheckCommand(LinuxCommand command) =>
+        new("sudo", ["-n", "-l", "--", command.FileName, .. command.Arguments]);
+
+    private static bool CanSudoWithoutPassword(LinuxCommand command) =>
+        Run(GetSudoCheckCommand(command), NullLogger.Instance, redirectOutput: true, logFailure: false);
 
     private static bool RunElevated(LinuxCommand command, bool isRoot, bool isInteractive, ILogger logger)
     {
