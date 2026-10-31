@@ -365,6 +365,80 @@ public sealed class GenerationPluginsIntegrationTests
         }
     }
 
+    private static async Task<JsonDocument> GenerateOpenApiSpecAsync(params RequestLog[] logs)
+    {
+        var plugin = new OpenApiSpecGeneratorPlugin(
+            TestDefaults.HttpClient,
+            NullLogger<OpenApiSpecGeneratorPlugin>.Instance,
+            Watch,
+            new DisabledLanguageModelClient(),
+            new TestProxyConfiguration(),
+            PluginConfig.Empty());
+
+        var args = Recording(logs);
+        var dir = await InTempCwdAsync(() => plugin.AfterRecordingStopAsync(args, CancellationToken.None));
+        try
+        {
+            var spec = dir.GetFiles("*.json").Single();
+            return JsonDocument.Parse(await File.ReadAllTextAsync(spec.FullName));
+        }
+        finally
+        {
+            dir.Delete(recursive: true);
+        }
+    }
+
+    private static string[] ParameterNames(JsonElement element, string location) =>
+        [.. element.GetProperty("parameters").EnumerateArray()
+            .Where(p => p.GetProperty("in").GetString() == location)
+            .Select(p => p.GetProperty("name").GetString()!)];
+
+    [Fact]
+    public async Task OpenApiSpecGenerator_IncludesParametersAndResponseHeaders()
+    {
+        var exchange = TestExchange
+            .Request(
+                "GET",
+                "https://api.contoso.com/users/123?$select=name",
+                headers: [("Accept", "application/json"), ("X-Custom-Request", "foo")])
+            .WithResponse(
+                HttpStatusCode.OK,
+                headers: [("Content-Type", "application/json"), ("X-Custom-Response", "bar")],
+                body: """{ "id": 123, "name": "alpha" }""")
+            .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(exchange);
+
+        var pathItem = spec.RootElement.GetProperty("paths").GetProperty("/users/{users-id}");
+        Assert.Equal(["users-id"], ParameterNames(pathItem, "path"));
+
+        var operation = pathItem.GetProperty("get");
+        Assert.Equal(["$select"], ParameterNames(operation, "query"));
+        Assert.Equal(["X-Custom-Request"], ParameterNames(operation, "header"));
+
+        var response = operation.GetProperty("responses").GetProperty("200");
+        var responseHeaders = response.GetProperty("headers").EnumerateObject().Select(h => h.Name).ToArray();
+        Assert.Equal(["X-Custom-Response"], responseHeaders);
+        Assert.True(response.GetProperty("content").TryGetProperty("application/json", out _));
+    }
+
+    [Fact]
+    public async Task OpenApiSpecGenerator_MergesParametersAcrossRequests()
+    {
+        static RequestLog Exchange(string url) =>
+            TestExchange
+                .Request("GET", url)
+                .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: """[]""")
+                .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(
+            Exchange("https://api.contoso.com/users?$top=1"),
+            Exchange("https://api.contoso.com/users?$top=2&$skip=1"));
+
+        var operation = spec.RootElement.GetProperty("paths").GetProperty("/users").GetProperty("get");
+        Assert.Equal(["$top", "$skip"], ParameterNames(operation, "query"));
+    }
+
     [Fact]
     public async Task TypeSpecGenerator_WritesSpec()
     {

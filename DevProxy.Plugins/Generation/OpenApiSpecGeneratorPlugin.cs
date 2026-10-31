@@ -230,7 +230,8 @@ public sealed class OpenApiSpecGeneratorPlugin(
         var resource = GetLastNonTokenSegment(request.RequestUri.Segments);
         var path = new OpenApiPathItem
         {
-            Operations = []
+            Operations = [],
+            Parameters = []
         };
 
         var method = request.Method?.ToUpperInvariant() switch
@@ -251,7 +252,8 @@ public sealed class OpenApiSpecGeneratorPlugin(
             // will be replaced later after the path has been parametrized
             Description = $"{method} {resource}",
             // will be replaced later after the path has been parametrized
-            OperationId = $"{method}.{resource}"
+            OperationId = $"{method}.{resource}",
+            Parameters = []
         };
         SetParametersFromQueryString(operation, HttpUtility.ParseQueryString(request.RequestUri.Query));
         SetParametersFromRequestHeaders(operation, request.Headers);
@@ -385,7 +387,9 @@ public sealed class OpenApiSpecGeneratorPlugin(
 
         var openApiResponse = new OpenApiResponse
         {
-            Description = response.StatusDescription
+            Description = response.StatusDescription,
+            Headers = new Dictionary<string, IOpenApiHeader>(),
+            Content = new Dictionary<string, IOpenApiMediaType>()
         };
         var responseCode = ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture);
         if (response.HasBody)
@@ -555,7 +559,7 @@ public sealed class OpenApiSpecGeneratorPlugin(
             if (paramFromOperation is null)
             {
                 Logger.LogDebug("      Adding parameter {ParameterName} to operation...", parameter.Name);
-                operation.Parameters?.Add(parameter);
+                (operation.Parameters ??= []).Add(parameter);
                 continue;
             }
 
