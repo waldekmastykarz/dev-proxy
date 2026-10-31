@@ -4,6 +4,7 @@
 
 using System.Diagnostics;
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace DevProxy.Proxy;
 
@@ -23,6 +24,13 @@ internal sealed record LinuxTrustStore(
 }
 
 /// <summary>A process invocation (file name + argument list, no shell).</summary>
+internal enum LinuxTrustResult
+{
+    Trusted,
+    Skipped,
+    Failed,
+}
+
 internal sealed record LinuxCommand(string FileName, IReadOnlyList<string> Arguments)
 {
     public override string ToString() => string.Join(' ', [FileName, .. Arguments]);
@@ -168,21 +176,45 @@ internal static class LinuxCertificateHelper
     }
 
     internal static string GetNssDatabaseDirectory() =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pki", "nssdb");
+        GetNssDatabaseDirectory(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Directory.Exists);
+
+    /// <summary>
+    /// Chromium uses the legacy ~/.pki/nssdb when it exists and ~/.local/share/pki/nssdb
+    /// otherwise (M146+). Install and remove share this selection.
+    /// </summary>
+    internal static string GetNssDatabaseDirectory(string home, Func<string, bool> dirExists)
+    {
+        var legacy = $"{home}/.pki/nssdb";
+        return dirExists(legacy) ? legacy : $"{home}/.local/share/pki/nssdb";
+    }
+
+    /// <summary>
+    /// Without a terminal, sudo can't prompt for a password. If it also isn't allowed to run
+    /// without one (e.g. a restricted sudoers grant), skip trusting instead of failing.
+    /// </summary>
+    internal static bool ShouldSkipTrust(bool isRoot, bool isInteractive, Func<bool> canSudoWithoutPassword) =>
+        !isRoot && !isInteractive && !canSudoWithoutPassword();
 
     internal static LinuxTrustStore? DetectTrustStore() => DetectTrustStore(Directory.Exists, FindSystemExecutable);
 
-    internal static bool TrustCertificate(X509Certificate2 certificate, LinuxTrustStore store, ILogger logger)
+    internal static LinuxTrustResult TrustCertificate(X509Certificate2 certificate, LinuxTrustStore store, ILogger logger)
     {
+        var (isRoot, isInteractive) = GetContext();
+        if (ShouldSkipTrust(isRoot, isInteractive, CanSudoWithoutPassword))
+        {
+            logger.LogWarning(
+                "Skipped trusting the Dev Proxy root certificate because sudo needs a password and there's no terminal to ask for it. To trust the certificate, run 'devproxy cert ensure' in an interactive terminal.");
+            return LinuxTrustResult.Skipped;
+        }
+
         var pemFilePath = ExportCertificateToPem(certificate, logger);
         if (pemFilePath is null)
         {
-            return false;
+            return LinuxTrustResult.Failed;
         }
 
         try
         {
-            var (isRoot, isInteractive) = GetContext();
             logger.LogInformation(
                 "Adding the Dev Proxy root certificate to the {Distro} system certificate store ({Path}).{SudoHint}",
                 store.Name,
@@ -198,13 +230,13 @@ internal static class LinuxCertificateHelper
                     {
                         logger.LogError("If sudo requires a password, run 'devproxy cert ensure' in an interactive terminal.");
                     }
-                    return false;
+                    return LinuxTrustResult.Failed;
                 }
             }
             logger.LogInformation("Certificate added to the system certificate store.");
 
             TrustInNssDatabase(pemFilePath, logger);
-            return true;
+            return LinuxTrustResult.Trusted;
         }
         finally
         {
@@ -302,6 +334,9 @@ internal static class LinuxCertificateHelper
     private static (bool IsRoot, bool IsInteractive) GetContext() =>
         (Environment.UserName == "root",
          !Console.IsInputRedirected && Environment.GetEnvironmentVariable("CI") is null);
+
+    private static bool CanSudoWithoutPassword() =>
+        Run(new("sudo", ["-n", "true"]), NullLogger.Instance, redirectOutput: true, logFailure: false);
 
     private static bool RunElevated(LinuxCommand command, bool isRoot, bool isInteractive, ILogger logger)
     {

@@ -133,6 +133,34 @@ public class LinuxCertificateHelperTests
     private static readonly LinuxTrustStore _debian = new("Debian/Ubuntu", "/usr/local/share/ca-certificates", "/etc/ssl/certs/ca-certificates.crt", "/usr/sbin/update-ca-certificates", [], ["--fresh"]);
 
     [Fact]
+    public void GetNssDatabaseDirectory_PrefersExistingLegacyDatabase()
+    {
+        Assert.Equal("/home/u/.pki/nssdb",
+            LinuxCertificateHelper.GetNssDatabaseDirectory("/home/u", Directories("/home/u/.pki/nssdb", "/home/u/.local/share/pki/nssdb")));
+    }
+
+    [Fact]
+    public void GetNssDatabaseDirectory_DefaultsToXdgLocation()
+    {
+        Assert.Equal("/home/u/.local/share/pki/nssdb",
+            LinuxCertificateHelper.GetNssDatabaseDirectory("/home/u", Directories()));
+    }
+
+    [Theory]
+    [InlineData(false, false, false, true)]
+    [InlineData(false, false, true, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(true, false, false, false)]
+    public void ShouldSkipTrust_OnlyWhenSudoCantRunWithoutPrompt(bool isRoot, bool isInteractive, bool canSudo, bool expected)
+    {
+        var probed = false;
+        var skip = LinuxCertificateHelper.ShouldSkipTrust(isRoot, isInteractive, () => { probed = true; return canSudo; });
+
+        Assert.Equal(expected, skip);
+        Assert.Equal(!isRoot && !isInteractive, probed);
+    }
+
+    [Fact]
     public void FindSystemExecutable_IgnoresPath()
     {
         var dir = Directory.CreateTempSubdirectory();

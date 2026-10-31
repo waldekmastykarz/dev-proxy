@@ -99,11 +99,17 @@ internal sealed class RootCertificateTrust(
                 LinuxCertificateHelper.LogManualInstructions(logger);
                 return;
             }
-            if (!LinuxCertificateHelper.TrustCertificate(rootCertificate, store, logger))
+            switch (LinuxCertificateHelper.TrustCertificate(rootCertificate, store, logger))
             {
-                throw new InvalidOperationException("Failed to trust the root certificate in the system certificate store.");
+                case LinuxTrustResult.Failed:
+                    throw new InvalidOperationException("Failed to trust the root certificate in the system certificate store.");
+                case LinuxTrustResult.Trusted:
+                    logger.LogInformation("Certificate trusted successfully.");
+                    break;
+                case LinuxTrustResult.Skipped:
+                default:
+                    break;
             }
-            logger.LogInformation("Certificate trusted successfully.");
         }
         else
         {
