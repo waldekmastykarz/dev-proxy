@@ -138,55 +138,65 @@ internal static class OpenApiSchemaValidator
     /// Gets the type declared by the schema, or when the schema doesn't declare
     /// a type, the types declared by its allOf/anyOf/oneOf subschemas.
     /// </summary>
-    public static JsonSchemaType? GetEffectiveType(IOpenApiSchema? schema) => GetEffectiveType(schema, 0);
-
-    private static JsonSchemaType? GetEffectiveType(IOpenApiSchema? schema, int depth)
+    public static JsonSchemaType? GetEffectiveType(IOpenApiSchema? schema)
     {
-        if (schema is null || depth > MaxDepth)
-        {
-            return null;
-        }
-        if (schema.Type is not null)
-        {
-            return schema.Type;
-        }
-
         JsonSchemaType? type = null;
-        foreach (var subSchema in GetComposedSchemas(schema))
+        foreach (var s in EnumerateComposition(schema, s => s.Type is null))
         {
-            var subType = GetEffectiveType(subSchema, depth + 1);
-            if (subType is not null)
+            if (s.Type is not null)
             {
-                type = (type ?? 0) | subType.Value;
+                type = (type ?? 0) | s.Type.Value;
             }
         }
         return type;
     }
 
-    private static IOpenApiSchema? GetItems(IOpenApiSchema? schema, int depth = 0)
-    {
-        if (schema is null || depth > MaxDepth)
-        {
-            return null;
-        }
-        return schema.Items ?? GetComposedSchemas(schema)
-            .Select(s => GetItems(s, depth + 1))
-            .FirstOrDefault(i => i is not null);
-    }
+    private static IOpenApiSchema? GetItems(IOpenApiSchema? schema) =>
+        EnumerateComposition(schema, s => s.Items is null).FirstOrDefault(s => s.Items is not null)?.Items;
 
     /// <summary>
     /// Gets the names of the properties declared by the schema and its allOf/anyOf/oneOf subschemas.
     /// </summary>
-    public static IEnumerable<string> GetPropertyNames(IOpenApiSchema? schema, int depth = 0)
-    {
-        if (schema is null || depth > MaxDepth)
-        {
-            return [];
-        }
-        return (schema.Properties?.Keys ?? Enumerable.Empty<string>())
-            .Concat(GetComposedSchemas(schema).SelectMany(s => GetPropertyNames(s, depth + 1)))
+    public static IEnumerable<string> GetPropertyNames(IOpenApiSchema? schema) =>
+        EnumerateComposition(schema, _ => true)
+            .SelectMany(s => s.Properties?.Keys ?? Enumerable.Empty<string>())
             .Distinct(StringComparer.Ordinal);
+
+    // Enumerates the schema and its allOf/anyOf/oneOf subschemas depth-first,
+    // visiting each (resolved) schema once so that repeated references and
+    // cycles don't cause exponential work.
+    private static IEnumerable<IOpenApiSchema> EnumerateComposition(IOpenApiSchema? schema, Func<IOpenApiSchema, bool> descend)
+    {
+        if (schema is null)
+        {
+            yield break;
+        }
+
+        var visited = new HashSet<IOpenApiSchema>(ReferenceEqualityComparer.Instance);
+        var stack = new Stack<(IOpenApiSchema Schema, int Depth)>();
+        stack.Push((schema, 0));
+        while (stack.Count > 0)
+        {
+            var (current, depth) = stack.Pop();
+            if (!visited.Add(ResolveTarget(current)))
+            {
+                continue;
+            }
+
+            yield return current;
+
+            if (depth < MaxDepth && descend(current))
+            {
+                foreach (var subSchema in GetComposedSchemas(current).Reverse())
+                {
+                    stack.Push((subSchema, depth + 1));
+                }
+            }
+        }
     }
+
+    private static IOpenApiSchema ResolveTarget(IOpenApiSchema schema) =>
+        schema is OpenApiSchemaReference reference ? (IOpenApiSchema?)reference.Target ?? schema : schema;
 
     private static IEnumerable<IOpenApiSchema> GetComposedSchemas(IOpenApiSchema schema) =>
         (schema.AllOf ?? []).Concat(schema.AnyOf ?? []).Concat(schema.OneOf ?? []);
@@ -311,7 +321,7 @@ internal static class OpenApiSchemaValidator
     // results are memoized per (resolved schema, path) to avoid exponential work.
     private static List<SchemaValidationError> ValidateComposed(JsonElement value, IOpenApiSchema schema, SchemaValidationDirection direction, string path, ValidationState state, int depth)
     {
-        var target = schema is OpenApiSchemaReference reference ? (IOpenApiSchema?)reference.Target ?? schema : schema;
+        var target = ResolveTarget(schema);
         if (state.Memo.TryGetValue((target, path), out var cached))
         {
             return cached;

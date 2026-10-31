@@ -584,6 +584,42 @@ public sealed class OpenApiValidationPluginTests : IDisposable
     }
 
     [Fact]
+    public async Task InspectsRepeatedParameterSchemaReferencesEfficiently()
+    {
+        var schemas = string.Join(",\n", Enumerable.Range(0, 30).Select(i =>
+            $$"""      "S{{i}}": { "allOf": [ { "$ref": "#/components/schemas/S{{i + 1}}" }, { "$ref": "#/components/schemas/S{{i + 1}}" } ] }"""));
+        var plugin = await CreatePluginWithSpecsAsync(("wideparams.json", $$"""
+            {
+              "openapi": "3.1.0",
+              "info": { "title": "Wide", "version": "1.0" },
+              "servers": [ { "url": "https://api.fabrikam.com" } ],
+              "paths": {
+                "/wide": {
+                  "get": {
+                    "parameters": [
+                      { "name": "count", "in": "query", "schema": { "$ref": "#/components/schemas/S0" } },
+                      { "name": "ids", "in": "query", "schema": { "type": "array", "allOf": [ { "$ref": "#/components/schemas/S0" } ] } },
+                      { "name": "filter", "in": "query", "schema": { "type": "object", "allOf": [ { "$ref": "#/components/schemas/S0" } ] } }
+                    ],
+                    "responses": { "204": { "description": "ok" } }
+                  }
+                }
+              },
+              "components": {
+                "schemas": {
+            {{schemas}},
+                  "S30": { "properties": { "status": { "type": "string" } } }
+                }
+              }
+            }
+            """));
+
+        var result = plugin.Validate(Call("GET", "https://api.fabrikam.com/wide?count=1&ids=1&status=active").Session);
+
+        Assert.Empty(result!.Issues);
+    }
+
+    [Fact]
     public async Task ReportsInvalidJsonForMediaTypesWithoutSchema()
     {
         var plugin = await CreatePluginWithSpecsAsync(("noschema.yaml", """
