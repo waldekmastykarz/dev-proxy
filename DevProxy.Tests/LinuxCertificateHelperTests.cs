@@ -345,7 +345,7 @@ public class LinuxCertificateHelperTests
     {
         var store = _fedora;
 
-        var commands = LinuxCertificateHelper.GetTrustCommands(store, "/tmp/cert.crt", removeLegacy: false);
+        var commands = LinuxCertificateHelper.GetTrustCommands(store, "/tmp/cert.crt");
 
         Assert.Equal(2, commands.Count);
         Assert.Equal("install", commands[0].FileName);
@@ -355,12 +355,38 @@ public class LinuxCertificateHelperTests
     }
 
     [Fact]
-    public void GetTrustCommands_RemovesLegacyAnchorBeforeRefresh()
+    public void GetLegacyCleanupCommands_RemovesLegacyAnchorThenRefreshes()
     {
-        var commands = LinuxCertificateHelper.GetTrustCommands(_debian, "/tmp/cert.crt", removeLegacy: true);
+        var commands = LinuxCertificateHelper.GetLegacyCleanupCommands(_debian);
 
-        Assert.Equal(["install", "rm", "/usr/sbin/update-ca-certificates"], commands.Select(c => c.FileName));
-        Assert.Equal(["-f", "/usr/local/share/ca-certificates/dev-proxy-ca.crt"], commands[1].Arguments);
+        Assert.Equal(["rm", "/usr/sbin/update-ca-certificates"], commands.Select(c => c.FileName));
+        Assert.Equal(["-f", "/usr/local/share/ca-certificates/dev-proxy-ca.crt"], commands[0].Arguments);
+    }
+
+    [Fact]
+    public void GetTrustRollback_NothingWhenAnchorAlreadyHoldsCertificate()
+    {
+        Assert.Null(LinuxCertificateHelper.GetTrustRollback(_debian, anchorHoldsCertificate: true, backupPath: null));
+    }
+
+    [Fact]
+    public void GetTrustRollback_RestoresPreviousAnchor()
+    {
+        var rollback = LinuxCertificateHelper.GetTrustRollback(_debian, anchorHoldsCertificate: false, backupPath: "/tmp/backup.crt");
+
+        Assert.NotNull(rollback);
+        Assert.Equal("install", rollback.FileName);
+        Assert.Equal(["-D", "-m", "0644", "/tmp/backup.crt", "/usr/local/share/ca-certificates/devproxy-ca.crt"], rollback.Arguments);
+    }
+
+    [Fact]
+    public void GetTrustRollback_RemovesNewAnchor()
+    {
+        var rollback = LinuxCertificateHelper.GetTrustRollback(_debian, anchorHoldsCertificate: false, backupPath: null);
+
+        Assert.NotNull(rollback);
+        Assert.Equal("rm", rollback.FileName);
+        Assert.Equal(["-f", "/usr/local/share/ca-certificates/devproxy-ca.crt"], rollback.Arguments);
     }
 
     [Fact]

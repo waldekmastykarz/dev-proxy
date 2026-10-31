@@ -134,16 +134,31 @@ internal static class LinuxCertificateHelper
     }
 
     // install/rm are passed by name so sudo resolves them through its secure_path.
-    internal static IReadOnlyList<LinuxCommand> GetTrustCommands(LinuxTrustStore store, string pemFilePath, bool removeLegacy)
-    {
-        List<LinuxCommand> commands = [new("install", ["-D", "-m", "0644", pemFilePath, store.CertificatePath])];
-        if (removeLegacy)
-        {
-            commands.Add(new("rm", ["-f", store.LegacyCertificatePath]));
-        }
-        commands.Add(new(store.UpdateCommand, store.UpdateArguments));
-        return commands;
-    }
+    internal static IReadOnlyList<LinuxCommand> GetTrustCommands(LinuxTrustStore store, string pemFilePath) =>
+    [
+        new("install", ["-D", "-m", "0644", pemFilePath, store.CertificatePath]),
+        new(store.UpdateCommand, store.UpdateArguments),
+    ];
+
+    /// <summary>
+    /// Runs only after the new anchor is trusted, so a failure here never leaves the certificate
+    /// untrusted. The refresh drops the legacy anchor's links from the store.
+    /// </summary>
+    internal static IReadOnlyList<LinuxCommand> GetLegacyCleanupCommands(LinuxTrustStore store) =>
+    [
+        new("rm", ["-f", store.LegacyCertificatePath]),
+        new(store.UpdateCommand, store.UpdateArguments),
+    ];
+
+    /// <summary>
+    /// How to undo the anchor install if trust is skipped: nothing when the anchor already held
+    /// this certificate, restore the previous anchor from <paramref name="backupPath"/> when there
+    /// was one, otherwise remove the new anchor.
+    /// </summary>
+    internal static LinuxCommand? GetTrustRollback(LinuxTrustStore store, bool anchorHoldsCertificate, string? backupPath) =>
+        anchorHoldsCertificate ? null
+        : backupPath is not null ? new("install", ["-D", "-m", "0644", backupPath, store.CertificatePath])
+        : new("rm", ["-f", store.CertificatePath]);
 
     internal static IReadOnlyList<LinuxCommand> GetUntrustCommands(LinuxTrustStore store, bool removeLegacy)
     {
@@ -262,15 +277,17 @@ internal static class LinuxCertificateHelper
             return LinuxTrustResult.Failed;
         }
 
+        string? backupPath = null;
         try
         {
             var (isRoot, isInteractive) = GetContext();
             var removeLegacy = FileContainsCertificate(store.LegacyCertificatePath, certificate);
-            var commands = GetTrustCommands(store, pemFilePath, removeLegacy);
-            // Undo the anchor install only if it changed something.
-            LinuxCommand? rollback = FileContainsCertificate(store.CertificatePath, certificate)
-                ? null
-                : new("rm", ["-f", store.CertificatePath]);
+            var anchorHoldsCertificate = FileContainsCertificate(store.CertificatePath, certificate);
+            if (!anchorHoldsCertificate)
+            {
+                backupPath = BackupFile(store.CertificatePath, logger);
+            }
+            var rollback = GetTrustRollback(store, anchorHoldsCertificate, backupPath);
 
             logger.LogInformation(
                 "Adding the Dev Proxy root certificate to the {Distro} system certificate store ({Path}).{SudoHint}",
@@ -278,11 +295,16 @@ internal static class LinuxCertificateHelper
                 store.CertificatePath,
                 isRoot ? string.Empty : " You might be asked for your password.");
 
-            switch (TrustSystemStore(commands, rollback, c => RunElevated(c, isRoot, isInteractive, logger)))
+            switch (TrustSystemStore(GetTrustCommands(store, pemFilePath), rollback, c => RunElevated(c, isRoot, isInteractive, logger)))
             {
                 case SystemTrustOutcome.Skipped:
                     logger.LogWarning(
                         "Skipped trusting the Dev Proxy root certificate because sudo needs a password and there's no terminal to ask for it. To trust the certificate, run 'devproxy cert ensure' in an interactive terminal.");
+                    return LinuxTrustResult.Skipped;
+                case SystemTrustOutcome.SkippedAnchorLeft when backupPath is not null:
+                    logger.LogWarning(
+                        "Skipped trusting the Dev Proxy root certificate because sudo needs a password and there's no terminal to ask for it. The certificate file {Path} was replaced but the change isn't active, and the previous file couldn't be restored. To finish trusting the certificate, run 'devproxy cert ensure' in an interactive terminal.",
+                        store.CertificatePath);
                     return LinuxTrustResult.Skipped;
                 case SystemTrustOutcome.SkippedAnchorLeft:
                     logger.LogWarning(
@@ -297,6 +319,14 @@ internal static class LinuxCertificateHelper
             }
             logger.LogInformation("Certificate added to the system certificate store.");
 
+            if (removeLegacy &&
+                RunAll(GetLegacyCleanupCommands(store), c => RunElevated(c, isRoot, isInteractive, logger)) != CommandOutcome.Succeeded)
+            {
+                logger.LogWarning(
+                    "Couldn't remove the old certificate file {Path}. It holds the same certificate, so trust isn't affected. To remove it, run 'sudo rm {Path}' and refresh the system certificate store.",
+                    store.LegacyCertificatePath, store.LegacyCertificatePath);
+            }
+
             return TrustInNssDatabase(pemFilePath, logger)
                 ? LinuxTrustResult.Trusted
                 : LinuxTrustResult.TrustedSystemOnly;
@@ -304,6 +334,10 @@ internal static class LinuxCertificateHelper
         finally
         {
             CleanupFile(pemFilePath);
+            if (backupPath is not null)
+            {
+                CleanupFile(backupPath);
+            }
         }
     }
 
@@ -329,7 +363,14 @@ internal static class LinuxCertificateHelper
                 isRoot ? string.Empty : " You might be asked for your password.");
 
             var outcome = RunAll(GetUntrustCommands(store, removeLegacy), c => RunElevated(c, isRoot, isInteractive, logger));
-            if (outcome == CommandOutcome.Succeeded)
+            if (outcome == CommandOutcome.Succeeded && FileContainsCertificate(store.BundlePath, certificate))
+            {
+                removed = false;
+                logger.LogError(
+                    "The system certificate store still trusts the Dev Proxy root certificate: {Bundle} still contains it, so another file in the CA anchors probably holds it. Remove that file and refresh the system certificate store.",
+                    store.BundlePath);
+            }
+            else if (outcome == CommandOutcome.Succeeded)
             {
                 logger.LogInformation("Certificate removed from the system certificate store.");
             }
@@ -618,26 +659,41 @@ internal static class LinuxCertificateHelper
         try
         {
             // Public certificate only; the private key never leaves the PFX.
-            var pem = certificate.ExportCertificatePem();
-            var pemFilePath = Path.Combine(Path.GetTempPath(), $"devproxy-ca-{Guid.NewGuid():N}.crt");
-            var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
-            if (!OperatingSystem.IsWindows())
-            {
-                options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-            }
-            using (var stream = new FileStream(pemFilePath, options))
-            using (var writer = new StreamWriter(stream))
-            {
-                writer.Write(pem);
-                writer.Write('\n');
-            }
-            return pemFilePath;
+            return WriteTempFile(certificate.ExportCertificatePem() + "\n");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
         {
             logger.LogError(ex, "Failed to export the root certificate to PEM");
             return null;
         }
+    }
+
+    /// <summary>Copies an existing anchor so it can be restored; null when there's none or it can't be read.</summary>
+    private static string? BackupFile(string path, ILogger logger)
+    {
+        try
+        {
+            return File.Exists(path) ? WriteTempFile(File.ReadAllText(path)) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug(ex, "Couldn't back up {Path}", path);
+            return null;
+        }
+    }
+
+    private static string WriteTempFile(string contents)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"devproxy-ca-{Guid.NewGuid():N}.crt");
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows())
+        {
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+        using var stream = new FileStream(path, options);
+        using var writer = new StreamWriter(stream);
+        writer.Write(contents);
+        return path;
     }
 
     private static void CleanupFile(string filePath)
