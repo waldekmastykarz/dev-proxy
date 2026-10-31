@@ -507,7 +507,19 @@ public sealed class OpenApiValidationPlugin(
         var direction = location == OpenApiValidationIssueLocation.Request
             ? SchemaValidationDirection.Request
             : SchemaValidationDirection.Response;
-        foreach (var error in OpenApiSchemaValidator.Validate(value, schema, direction, name))
+        var errors = OpenApiSchemaValidator.Validate(value, schema, direction, name);
+        if (errors.Count > 0)
+        {
+            // the value might be valid as a string when the schema allows
+            // multiple types, e.g. anyOf: [{ type: integer, enum: [1] }, { type: string }]
+            var raw = OpenApiSchemaValidator.CoerceParameterValue(values, schema, name, style, explode, coerce: false);
+            if (OpenApiSchemaValidator.Validate(raw, schema, direction, name).Count == 0)
+            {
+                return;
+            }
+        }
+
+        foreach (var error in errors)
         {
             issues.Add(new()
             {

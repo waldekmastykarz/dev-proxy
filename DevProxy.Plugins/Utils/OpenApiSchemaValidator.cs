@@ -35,7 +35,7 @@ internal static class OpenApiSchemaValidator
     {
         public int Evaluations { get; set; }
         public bool BudgetExceeded { get; set; }
-        public Dictionary<(IOpenApiSchema Schema, string Path), List<SchemaValidationError>> Memo { get; } = [];
+        public Dictionary<(IOpenApiSchema Schema, string Path, int Depth), List<SchemaValidationError>> Memo { get; } = [];
     }
 
     public static List<SchemaValidationError> Validate(
@@ -69,13 +69,15 @@ internal static class OpenApiSchemaValidator
     /// according to the parameter's serialization style and coercing them
     /// to the primitive type declared by the schema when possible, so that they
     /// can be validated with <see cref="Validate(JsonNode?, IOpenApiSchema?, SchemaValidationDirection, string)"/>.
+    /// When <paramref name="coerce"/> is false, values are kept as strings.
     /// </summary>
     public static JsonNode? CoerceParameterValue(
         IReadOnlyList<string> values,
         IOpenApiSchema? schema,
         string name,
         ParameterStyle style,
-        bool explode)
+        bool explode,
+        bool coerce = true)
     {
         var type = GetEffectiveType(schema);
         if (type is not null && type.Value.HasFlag(JsonSchemaType.Array))
@@ -84,13 +86,14 @@ internal static class OpenApiSchemaValidator
             var array = new JsonArray();
             foreach (var item in SplitArrayValues(values, name, style, explode))
             {
-                array.Add(CoercePrimitive(item, itemsSchema));
+                array.Add(coerce ? CoercePrimitive(item, itemsSchema) : JsonValue.Create(item));
             }
             return array;
         }
 
         var value = values.Count > 0 ? values[0] : string.Empty;
-        return CoercePrimitive(StripStylePrefix(value, name, style), schema);
+        var stripped = StripStylePrefix(value, name, style);
+        return coerce ? CoercePrimitive(stripped, schema) : JsonValue.Create(stripped);
     }
 
     private static IEnumerable<string> SplitArrayValues(IReadOnlyList<string> values, string name, ParameterStyle style, bool explode)
@@ -286,6 +289,7 @@ internal static class OpenApiSchemaValidator
 
         if (schema.AllOf is { Count: > 0 })
         {
+            var seen = new HashSet<SchemaValidationError>(errors);
             for (var i = 0; i < schema.AllOf.Count; i++)
             {
                 foreach (var subError in ValidateComposed(value, schema.AllOf[i], direction, path, state, depth + 1))
@@ -305,7 +309,7 @@ internal static class OpenApiSchemaValidator
                     }
 
                     // subschemas can report the same error, e.g. when they reference the same schema
-                    if (!errors.Contains(error))
+                    if (seen.Add(error))
                     {
                         errors.Add(error);
                     }
@@ -338,18 +342,19 @@ internal static class OpenApiSchemaValidator
 
     // Composition keywords can reference the same subschema many times for the
     // same value. Within a single validation, a path identifies a value, so
-    // results are memoized per (resolved schema, path) to avoid exponential work.
+    // results are memoized per (resolved schema, path, depth) to avoid exponential
+    // work. Depth is part of the key, because results near the depth limit differ.
     private static List<SchemaValidationError> ValidateComposed(JsonElement value, IOpenApiSchema schema, SchemaValidationDirection direction, string path, ValidationState state, int depth)
     {
         var target = ResolveTarget(schema);
-        if (state.Memo.TryGetValue((target, path), out var cached))
+        if (state.Memo.TryGetValue((target, path, depth), out var cached))
         {
             return cached;
         }
 
         var subErrors = new List<SchemaValidationError>();
         ValidateCore(value, schema, direction, path, subErrors, state, depth);
-        state.Memo[(target, path)] = subErrors;
+        state.Memo[(target, path, depth)] = subErrors;
         return subErrors;
     }
 

@@ -643,6 +643,30 @@ public sealed class OpenApiValidationPluginTests : IDisposable
     }
 
     [Fact]
+    public async Task AcceptsParameterValuesValidAsStrings()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("strings.yaml", """
+            openapi: 3.0.3
+            info: { title: Strings, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                get:
+                  parameters:
+                    - { name: x, in: query, schema: { anyOf: [ { type: integer, enum: [1, 2] }, { type: string } ] } }
+                    - { name: n, in: query, schema: { type: integer, enum: [1, 2] } }
+                  responses: { '204': { description: ok } }
+            """));
+
+        var valid = plugin.Validate(Call("GET", "https://api.fabrikam.com/items?x=42&n=1").Session);
+        var invalid = plugin.Validate(Call("GET", "https://api.fabrikam.com/items?n=42").Session);
+
+        Assert.Empty(valid!.Issues);
+        Assert.Contains("isn't one of the allowed values", Assert.Single(Messages(invalid)), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ReportsInvalidJsonForMediaTypesWithoutSchema()
     {
         var plugin = await CreatePluginWithSpecsAsync(("noschema.yaml", """
@@ -773,6 +797,45 @@ public sealed class OpenApiValidationPluginTests : IDisposable
         Assert.Contains("exceeds the maximum of 5,242,880 bytes", Assert.Single(plugin.GetNotes(large)), StringComparison.Ordinal);
         Assert.Contains("Expected integer", Assert.Single(Messages(plugin.Validate(small))), StringComparison.Ordinal);
         Assert.Empty(plugin.GetNotes(small));
+    }
+
+    [Fact]
+    public async Task DoesNotReuseDepthLimitedResultsAtShallowerDepths()
+    {
+        // the chain reaches Str exactly beyond the depth limit, while the
+        // second anyOf branch reaches it at a shallow depth
+        var schemas = string.Join(",\n", Enumerable.Range(0, 63).Select(i =>
+            $$"""      "S{{i}}": { "allOf": [ { "$ref": "#/components/schemas/S{{i + 1}}" } ] }"""));
+        var plugin = await CreatePluginWithSpecsAsync(("depthcache.json", $$"""
+            {
+              "openapi": "3.0.3",
+              "info": { "title": "Depth cache", "version": "1.0" },
+              "servers": [ { "url": "https://api.fabrikam.com" } ],
+              "paths": {
+                "/items": {
+                  "get": {
+                    "responses": {
+                      "200": { "description": "ok", "content": { "application/json": { "schema": {
+                        "anyOf": [ { "$ref": "#/components/schemas/S0" }, { "$ref": "#/components/schemas/Str" } ]
+                      } } } }
+                    }
+                  }
+                }
+              },
+              "components": {
+                "schemas": {
+            {{schemas}},
+                  "S63": { "allOf": [ { "$ref": "#/components/schemas/Str" } ] },
+                  "Str": { "type": "string" }
+                }
+              }
+            }
+            """));
+
+        var result = plugin.Validate(TestExchange.Request("GET", "https://api.fabrikam.com/items")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: "\"ok\"").Session);
+
+        Assert.Empty(result!.Issues);
     }
 
     [Fact]
