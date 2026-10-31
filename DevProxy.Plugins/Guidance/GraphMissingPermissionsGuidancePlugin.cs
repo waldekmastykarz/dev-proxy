@@ -188,12 +188,20 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
                 MessageType.Warning);
         }
 
+        var mayTargetOtherUser = permissionsType == GraphPermissionsType.Delegated &&
+            tokenizedUrl.StartsWith("/users/", StringComparison.OrdinalIgnoreCase) &&
+            !IsSignedInUser(absoluteUrl, userIdentifiers);
+
+        // delegated permissions for another user's resources, like their
+        // mailbox, only work if that data is accessible to the signed-in user
+        var otherUserDataNote = mayTargetOtherUser && tokenizedUrl.Count(c => c == '/') > 2
+            ? " If the request accesses another user's data, keep in mind that delegated permissions only allow access to data that the signed-in user can access. To access another user's data, such as their mail or calendar, that user must share it with the signed-in user (and the app must use the corresponding .Shared permission where available), or the app must use application permissions."
+            : string.Empty;
+
         // delegated self-only permissions, like User.Read, are listed for
         // /users/{id} but only grant access to the signed-in user
         var selfOnlyNote = string.Empty;
-        if (permissionsType == GraphPermissionsType.Delegated &&
-            tokenizedUrl.StartsWith("/users/", StringComparison.OrdinalIgnoreCase) &&
-            !IsSignedInUser(absoluteUrl, userIdentifiers))
+        if (mayTargetOtherUser)
         {
             var selfOnlyPermissions = requiredPermissions
                 .Where(p => SelfOnlyDelegatedPermissions.Contains(p.Value))
@@ -217,7 +225,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
 
         if (grantingPermissions.Length > 0)
         {
-            return ($"{requestDescription} failed with 403 Forbidden even though the access token has the {FormatList(grantingPermissions)} {GetPermissionsTypeString(permissionsType.Value)} permission(s) which allow calling {method} {tokenizedUrl}. The request likely failed for another reason, for example: the {(permissionsType == GraphPermissionsType.Delegated ? "signed-in user" : "app")} doesn't have access to the resource, a required license or administrative role is missing, or the resource is restricted by a policy. Check the error details in the response for more information.",
+            return ($"{requestDescription} failed with 403 Forbidden even though the access token has the {FormatList(grantingPermissions)} {GetPermissionsTypeString(permissionsType.Value)} permission(s) which allow calling {method} {tokenizedUrl}. The request likely failed for another reason, for example: the {(permissionsType == GraphPermissionsType.Delegated ? "signed-in user" : "app")} doesn't have access to the resource, a required license or administrative role is missing, or the resource is restricted by a policy. Check the error details in the response for more information." + otherUserDataNote,
                 MessageType.Warning);
         }
 
@@ -241,6 +249,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
                     (otherPermissions.Length > 0 ? $" Alternatively, use one of the following higher-privileged permissions: {FormatList(otherPermissions)}." : string.Empty)
                 : $"Add any of the following permissions: {FormatList(otherPermissions)}.") +
             selfOnlyNote +
+            otherUserDataNote +
             " " + GetInstructions(permissionsType.Value);
 
         return (message, MessageType.Failed);

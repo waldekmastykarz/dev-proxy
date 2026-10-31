@@ -373,6 +373,38 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
     }
 
     [Fact]
+    public async Task Forbidden_DelegatedOtherUserData_IncludesSharingNote()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/users/8e6b0bba-5bce-4b1b-9d5b-1f5e8b0d1a6c/messages", [("Authorization", BearerToken(scp: "User.Read", oid: "1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d"))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Failed));
+        Assert.Contains("Mail.ReadBasic", log.Message, StringComparison.Ordinal);
+        Assert.Contains("that user must share it with the signed-in user", log.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Forbidden_DelegatedSignedInUserData_OmitsSharingNote()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        const string signedInUserId = "8e6b0bba-5bce-4b1b-9d5b-1f5e8b0d1a6c";
+        var exchange = TestExchange
+            .Request("GET", $"https://graph.microsoft.com/v1.0/users/{signedInUserId}/messages", [("Authorization", BearerToken(scp: "User.Read", oid: signedInUserId))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Failed));
+        Assert.DoesNotContain("must share it", log.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Forbidden_NoLeastPrivilegedPermissionMarked_ListsUnrankedAlternatives()
     {
         using var handler = new StubPermissionsHandler("""
