@@ -25,7 +25,7 @@ internal abstract record DetectedAuth;
 
 internal sealed record DetectedApiKeyAuth(string Name, DetectedApiKeyLocation In) : DetectedAuth;
 
-internal sealed record DetectedBearerAuth : DetectedAuth;
+internal sealed record DetectedBearerAuth(bool IsJwt = false) : DetectedAuth;
 
 internal sealed record DetectedOAuth2Auth(
     string Name,
@@ -36,7 +36,6 @@ internal sealed record DetectedOAuth2Auth(
     IReadOnlyList<string> Scopes) : DetectedAuth
 {
     public const string EntraName = "EntraOAuth2Auth";
-    public const string GenericName = "APIOAuth2Auth";
 }
 
 /// <summary>
@@ -109,6 +108,15 @@ internal static class AuthDetector
 
         var issuer = jwtToken.Issuer;
         logger.LogDebug("Issuer: {Issuer}", issuer);
+        if (!IsEntraToken(issuer, logger))
+        {
+            // the issuer doesn't identify the OAuth endpoints, so we can't
+            // describe a usable OAuth2 flow
+            logger.LogDebug("JWT not issued by Entra. Using bearer auth");
+            logger.LogTrace("Left {Name}", nameof(DetectAuthorizationAuth));
+            return new DetectedBearerAuth(IsJwt: true);
+        }
+
         var scopes = jwtToken.Claims
             .Where(c => c.Type == "scp")
             .SelectMany(c => c.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
@@ -127,34 +135,27 @@ internal static class AuthDetector
         {
             logger.LogDebug("Roles: {Roles}", string.Join(", ", roles));
         }
+        // delegated tokens can also contain roles, so only treat tokens
+        // without scopes as app-only
+        var flowType = scopes.Count == 0 && roles.Count != 0 ?
+            DetectedOAuth2FlowType.ClientCredentials : DetectedOAuth2FlowType.AuthorizationCode;
         scopes.AddRange(roles);
 
-        DetectedOAuth2Auth auth;
-        if (IsEntraToken(issuer, logger))
-        {
-            var version = jwtToken.Claims
-                .FirstOrDefault(c => c.Type == "ver")?.Value ?? "1.0";
-            var baseUrl = issuer.Contains("v2.0", StringComparison.OrdinalIgnoreCase) ?
-                issuer.Replace("v2.0", "", StringComparison.OrdinalIgnoreCase) : issuer;
-            var tokenUrl = version == "1.0" ? $"{baseUrl}oauth2/token" : $"{baseUrl}oauth2/v2.0/token";
-            auth = new(
-                DetectedOAuth2Auth.EntraName,
-                roles.Count != 0 ? DetectedOAuth2FlowType.ClientCredentials : DetectedOAuth2FlowType.AuthorizationCode,
-                version == "1.0" ? $"{baseUrl}oauth2/authorize" : $"{baseUrl}oauth2/v2.0/authorize",
-                tokenUrl,
-                tokenUrl,
-                scopes);
-        }
-        else
-        {
-            auth = new(
-                DetectedOAuth2Auth.GenericName,
-                DetectedOAuth2FlowType.AuthorizationCode,
-                issuer,
-                issuer,
-                string.Empty,
-                scopes);
-        }
+        var version = jwtToken.Claims
+            .FirstOrDefault(c => c.Type == "ver")?.Value ?? "1.0";
+        var baseUrl = issuer.Contains("v2.0", StringComparison.OrdinalIgnoreCase) ?
+            issuer.Replace("v2.0", "", StringComparison.OrdinalIgnoreCase) : issuer;
+        // v1 tokens are issued by sts.windows.net, but the OAuth endpoints
+        // are on login.microsoftonline.com
+        baseUrl = baseUrl.Replace("https://sts.windows.net/", "https://login.microsoftonline.com/", StringComparison.OrdinalIgnoreCase);
+        var tokenUrl = version == "1.0" ? $"{baseUrl}oauth2/token" : $"{baseUrl}oauth2/v2.0/token";
+        var auth = new DetectedOAuth2Auth(
+            DetectedOAuth2Auth.EntraName,
+            flowType,
+            version == "1.0" ? $"{baseUrl}oauth2/authorize" : $"{baseUrl}oauth2/v2.0/authorize",
+            tokenUrl,
+            tokenUrl,
+            scopes);
 
         logger.LogTrace("Left {Name}", nameof(DetectAuthorizationAuth));
         return auth;

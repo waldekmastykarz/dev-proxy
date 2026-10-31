@@ -75,6 +75,14 @@ public sealed class OpenApiSpecGeneratorPlugin(
 
     public override string Name => nameof(OpenApiSpecGeneratorPlugin);
 
+    private const string BearerSchemeName = "BearerAuth";
+
+    private sealed class SecurityState
+    {
+        public HashSet<OpenApiOperation> AnonymousOperations { get; } = new(ReferenceEqualityComparer.Instance);
+        public Dictionary<OpenApiSecurityRequirement, string> RequirementKeys { get; } = new(ReferenceEqualityComparer.Instance);
+    }
+
     public override async Task AfterRecordingStopAsync(RecordingArgs e, CancellationToken cancellationToken)
     {
         Logger.LogTrace("{Method} called", nameof(AfterRecordingStopAsync));
@@ -90,6 +98,7 @@ public sealed class OpenApiSpecGeneratorPlugin(
         Logger.LogInformation("Creating OpenAPI spec from recorded requests...");
 
         var openApiDocs = new List<OpenApiDocument>();
+        var securityState = new SecurityState();
 
         foreach (var request in e.RequestLogs)
         {
@@ -136,7 +145,8 @@ public sealed class OpenApiSpecGeneratorPlugin(
                     parametrizedPath,
                     cancellationToken
                 );
-                AddOrMergePathItem(openApiDocs, pathItem, request.Context.Session.Request.RequestUri, parametrizedPath, detectedAuth);
+                AddOrMergePathItem(openApiDocs, pathItem, request.Context.Session.Request.RequestUri, parametrizedPath);
+                AddOrMergeSecurity(openApiDocs, pathItem, request.Context.Session, parametrizedPath, detectedAuth, securityState);
             }
             catch (Exception ex)
             {
@@ -477,7 +487,7 @@ public sealed class OpenApiSpecGeneratorPlugin(
         return null;
     }
 
-    private void AddOrMergePathItem(List<OpenApiDocument> openApiDocs, OpenApiPathItem pathItem, Uri requestUri, string parametrizedPath, DetectedAuth? detectedAuth)
+    private void AddOrMergePathItem(List<OpenApiDocument> openApiDocs, OpenApiPathItem pathItem, Uri requestUri, string parametrizedPath)
     {
         var serverUrl = requestUri.GetLeftPart(UriPartial.Authority);
         var openApiDoc = openApiDocs.FirstOrDefault(d => d.Servers?.Any(s => s.Url == serverUrl) == true);
@@ -526,39 +536,87 @@ public sealed class OpenApiSpecGeneratorPlugin(
                 AddOrMergeOperation((OpenApiPathItem)value, newOperation.Value.Key, newOperation.Value.Value);
             }
         }
-
-        var method = pathItem.Operations?.FirstOrDefault().Key;
-        if (detectedAuth is not null &&
-            method is not null &&
-            value.Operations?.TryGetValue(method, out var operation) == true)
-        {
-            AddOrMergeSecurity(openApiDoc, operation, detectedAuth);
-        }
     }
 
-    private void AddOrMergeSecurity(OpenApiDocument openApiDoc, OpenApiOperation operation, DetectedAuth detectedAuth)
+    private void AddOrMergeSecurity(
+        List<OpenApiDocument> openApiDocs,
+        OpenApiPathItem pathItem,
+        IProxySession session,
+        string parametrizedPath,
+        DetectedAuth? detectedAuth,
+        SecurityState securityState)
     {
-        var (schemeName, scopes) = AddOrMergeSecurityScheme(openApiDoc, detectedAuth);
-
-        operation.Security ??= [];
-        var existingRequirement = operation.Security
-            .SelectMany(r => r)
-            .FirstOrDefault(r => r.Key.Reference.Id == schemeName);
-        if (existingRequirement.Key is null)
+        var serverUrl = session.Request.RequestUri.GetLeftPart(UriPartial.Authority);
+        var openApiDoc = openApiDocs.FirstOrDefault(d => d.Servers?.Any(s => s.Url == serverUrl) == true);
+        var method = pathItem.Operations?.FirstOrDefault().Key;
+        if (openApiDoc is null ||
+            method is null ||
+            !openApiDoc.Paths.TryGetValue(parametrizedPath, out var docPathItem) ||
+            docPathItem.Operations?.TryGetValue(method, out var operation) != true ||
+            operation is null)
         {
-            Logger.LogDebug("    Adding security requirement {SchemeName} to operation...", schemeName);
-            operation.Security.Add(new OpenApiSecurityRequirement
-            {
-                [new OpenApiSecuritySchemeReference(schemeName, openApiDoc)] = [.. scopes]
-            });
             return;
         }
 
-        Logger.LogDebug("    Merging security requirement {SchemeName} into operation...", schemeName);
-        foreach (var scope in scopes.Where(s => !existingRequirement.Value.Contains(s)))
+        if (detectedAuth is null)
         {
-            existingRequirement.Value.Add(scope);
+            var statusCode = (int)(session.Response?.StatusCode ?? 0);
+            if (statusCode is >= 200 and < 300)
+            {
+                _ = securityState.AnonymousOperations.Add(operation);
+                AddAnonymousSecurityRequirement(operation);
+            }
+            return;
         }
+
+        var (schemeName, scopes) = AddOrMergeSecurityScheme(openApiDoc, detectedAuth);
+        // requirements for different OAuth2 flows are alternatives, so we keep
+        // them separate and only merge scopes within the same flow
+        var requirementKey = detectedAuth is DetectedOAuth2Auth oauth2 ?
+            $"{schemeName}:{oauth2.FlowType}" : schemeName;
+
+        operation.Security ??= [];
+        var existingRequirement = operation.Security
+            .FirstOrDefault(r => securityState.RequirementKeys.TryGetValue(r, out var key) && key == requirementKey);
+        if (existingRequirement is null)
+        {
+            Logger.LogDebug("    Adding security requirement {RequirementKey} to operation...", requirementKey);
+            var requirement = new OpenApiSecurityRequirement
+            {
+                [new OpenApiSecuritySchemeReference(schemeName, openApiDoc)] = [.. scopes]
+            };
+            securityState.RequirementKeys[requirement] = requirementKey;
+            operation.Security.Add(requirement);
+        }
+        else
+        {
+            Logger.LogDebug("    Merging security requirement {RequirementKey} into operation...", requirementKey);
+            var requirementScopes = existingRequirement.First().Value;
+            foreach (var scope in scopes.Where(s => !requirementScopes.Contains(s)))
+            {
+                requirementScopes.Add(scope);
+            }
+        }
+
+        if (securityState.AnonymousOperations.Contains(operation))
+        {
+            AddAnonymousSecurityRequirement(operation);
+        }
+    }
+
+    // an empty requirement marks authentication as optional for operations
+    // that were also called successfully without authentication
+    private void AddAnonymousSecurityRequirement(OpenApiOperation operation)
+    {
+        if (operation.Security is null ||
+            operation.Security.Count == 0 ||
+            operation.Security.Any(r => r.Count == 0))
+        {
+            return;
+        }
+
+        Logger.LogDebug("    Marking authentication as optional for operation...");
+        operation.Security.Add(new OpenApiSecurityRequirement());
     }
 
     private (string SchemeName, IReadOnlyList<string> Scopes) AddOrMergeSecurityScheme(OpenApiDocument openApiDoc, DetectedAuth detectedAuth)
@@ -575,7 +633,7 @@ public sealed class OpenApiSpecGeneratorPlugin(
                 },
                 []),
             DetectedBearerAuth => (
-                "BearerAuth",
+                BearerSchemeName,
                 new OpenApiSecurityScheme
                 {
                     Type = SecuritySchemeType.Http,
@@ -609,6 +667,10 @@ public sealed class OpenApiSpecGeneratorPlugin(
         if (detectedAuth is DetectedOAuth2Auth oauth2Auth)
         {
             MergeOAuth2Flow(scheme, oauth2Auth);
+        }
+        else if (detectedAuth is DetectedBearerAuth { IsJwt: true })
+        {
+            scheme.BearerFormat = "JWT";
         }
 
         return (schemeName, scopes);
