@@ -102,6 +102,24 @@ public sealed class ConfigurationPlaceholderTests : IDisposable
     }
 
     [Fact]
+    public void AddConfigFile_SkipsInlineRewriteRules_WithPlaceholdersInPluginMetadata()
+    {
+        var path = Write("devproxyrc.json", $$"""
+        {
+          "env": { "PLUGIN": "RewritePlugin", "SECTION": "myRewrites" },
+          "plugins": [ { "name": "${PLUGIN}", "configSection": "${SECTION}" } ],
+          "myRewrites": { "rewrites": [ { "out": { "url": "/users/${{{OsVariable}}}" } } ] }
+        }
+        """);
+
+        var (config, _) = Build(path, null);
+
+        Assert.Equal("RewritePlugin", config["plugins:0:name"]);
+        Assert.Equal("myRewrites", config["plugins:0:configSection"]);
+        Assert.Equal($"/users/${{{OsVariable}}}", config["myRewrites:rewrites:0:out:url"]);
+    }
+
+    [Fact]
     public void AddConfigFile_Yaml_ResolvesPlaceholders()
     {
         var path = Write("devproxyrc.yaml", $$"""

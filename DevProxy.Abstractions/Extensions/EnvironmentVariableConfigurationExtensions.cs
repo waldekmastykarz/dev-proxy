@@ -131,7 +131,7 @@ public static class ConfigurationPlaceholderResolver
             return envSection.TryGetValue(name, out value) ? value : Environment.GetEnvironmentVariable(name);
         }
 
-        var rewriteRulePrefixes = GetRewriteRulePrefixes(data);
+        var rewriteRulePrefixes = GetRewriteRulePrefixes(data, lookup);
         foreach (var key in data.Keys.ToArray())
         {
             if (IsEnvSectionVariable(key) ||
@@ -152,8 +152,15 @@ public static class ConfigurationPlaceholderResolver
 
     // RewritePlugin rules use ${name} for regex named groups and resolve ${env:NAME}
     // per request, so inline rules are excluded from load-time resolution
-    private static string[] GetRewriteRulePrefixes(IDictionary<string, string?> data)
+    private static string[] GetRewriteRulePrefixes(IDictionary<string, string?> data, Func<string, string?> lookup)
     {
+        // plugin names and sections may use placeholders too; resolve them here without
+        // changing data, which is resolved afterwards
+        string? resolve(string? value)
+        {
+            return value is null ? null : EnvironmentVariablePlaceholders.Resolve(value, lookup);
+        }
+
         const string pluginsPrefix = "plugins:";
         const string nameSuffix = ":name";
         const string rewritePluginName = "RewritePlugin";
@@ -163,8 +170,8 @@ public static class ConfigurationPlaceholderResolver
                 e.Key.StartsWith(pluginsPrefix, StringComparison.OrdinalIgnoreCase) &&
                 e.Key.EndsWith(nameSuffix, StringComparison.OrdinalIgnoreCase) &&
                 e.Key.Count(c => c == ':') == 2 &&
-                string.Equals(e.Value, rewritePluginName, StringComparison.Ordinal))
-            .Select(e => data.TryGetValue($"{e.Key[..^nameSuffix.Length]}:configSection", out var section) ? section : null)
+                string.Equals(resolve(e.Value), rewritePluginName, StringComparison.Ordinal))
+            .Select(e => data.TryGetValue($"{e.Key[..^nameSuffix.Length]}:configSection", out var section) ? resolve(section) : null)
             .Where(section => !string.IsNullOrEmpty(section))
             .Select(section => $"{section}:rewrites:")];
     }
