@@ -32,6 +32,13 @@ internal enum LinuxTrustResult
     Failed,
 }
 
+internal enum NssLookup
+{
+    Present,
+    Absent,
+    Unknown,
+}
+
 internal enum CommandOutcome
 {
     Succeeded,
@@ -155,6 +162,9 @@ internal static class LinuxCertificateHelper
     /// this certificate, restore the previous anchor from <paramref name="backupPath"/> when there
     /// was one, otherwise remove the new anchor.
     /// </summary>
+    internal static LinuxCommand GetBackupCommand(LinuxTrustStore store, string backupPath) =>
+        new("install", ["-m", "0600", store.CertificatePath, backupPath]);
+
     internal static LinuxCommand? GetTrustRollback(LinuxTrustStore store, bool anchorHoldsCertificate, string? backupPath) =>
         anchorHoldsCertificate ? null
         : backupPath is not null ? new("install", ["-D", "-m", "0644", backupPath, store.CertificatePath])
@@ -277,17 +287,14 @@ internal static class LinuxCertificateHelper
             return LinuxTrustResult.Failed;
         }
 
+        const string skippedMessage = "Skipped trusting the Dev Proxy root certificate because sudo needs a password and there's no terminal to ask for it. To trust the certificate, run 'devproxy cert ensure' in an interactive terminal.";
+        DirectoryInfo? backupDir = null;
         string? backupPath = null;
         try
         {
             var (isRoot, isInteractive) = GetContext();
             var removeLegacy = FileContainsCertificate(store.LegacyCertificatePath, certificate);
             var anchorHoldsCertificate = FileContainsCertificate(store.CertificatePath, certificate);
-            if (!anchorHoldsCertificate)
-            {
-                backupPath = BackupFile(store.CertificatePath, logger);
-            }
-            var rollback = GetTrustRollback(store, anchorHoldsCertificate, backupPath);
 
             logger.LogInformation(
                 "Adding the Dev Proxy root certificate to the {Distro} system certificate store ({Path}).{SudoHint}",
@@ -295,11 +302,30 @@ internal static class LinuxCertificateHelper
                 store.CertificatePath,
                 isRoot ? string.Empty : " You might be asked for your password.");
 
+            if (!anchorHoldsCertificate && File.Exists(store.CertificatePath))
+            {
+                // Back up the anchor being replaced so a skipped trust can restore it. Elevated,
+                // so it works even if the file isn't readable by the current user.
+                backupDir = Directory.CreateTempSubdirectory("devproxy-");
+                backupPath = $"{backupDir.FullName}/previous.crt";
+                switch (RunElevated(GetBackupCommand(store, backupPath), isRoot, isInteractive, logger))
+                {
+                    case CommandOutcome.PasswordRequired:
+                        logger.LogWarning(skippedMessage);
+                        return LinuxTrustResult.Skipped;
+                    case CommandOutcome.Failed:
+                        return LinuxTrustResult.Failed;
+                    case CommandOutcome.Succeeded:
+                    default:
+                        break;
+                }
+            }
+            var rollback = GetTrustRollback(store, anchorHoldsCertificate, backupPath);
+
             switch (TrustSystemStore(GetTrustCommands(store, pemFilePath), rollback, c => RunElevated(c, isRoot, isInteractive, logger)))
             {
                 case SystemTrustOutcome.Skipped:
-                    logger.LogWarning(
-                        "Skipped trusting the Dev Proxy root certificate because sudo needs a password and there's no terminal to ask for it. To trust the certificate, run 'devproxy cert ensure' in an interactive terminal.");
+                    logger.LogWarning(skippedMessage);
                     return LinuxTrustResult.Skipped;
                 case SystemTrustOutcome.SkippedAnchorLeft when backupPath is not null:
                     logger.LogWarning(
@@ -334,9 +360,14 @@ internal static class LinuxCertificateHelper
         finally
         {
             CleanupFile(pemFilePath);
-            if (backupPath is not null)
+            try
             {
-                CleanupFile(backupPath);
+                // The backup is root-owned, but deleting it only needs write access to our directory.
+                backupDir?.Delete(recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // ignore cleanup failures
             }
         }
     }
@@ -399,6 +430,22 @@ internal static class LinuxCertificateHelper
         }
 
         var nssDir = GetNssDatabaseDirectory();
+        var passwordFile = CreateNssPasswordFile();
+        try
+        {
+            return TrustInNssDatabase(certutil, nssDir, passwordFile, pemFilePath, logger);
+        }
+        finally
+        {
+            if (passwordFile is not null)
+            {
+                CleanupFile(passwordFile);
+            }
+        }
+    }
+
+    private static bool TrustInNssDatabase(string certutil, string nssDir, string? passwordFile, string pemFilePath, ILogger logger)
+    {
         var db = $"sql:{nssDir}";
         string error;
         if (!Directory.Exists(nssDir))
@@ -409,20 +456,20 @@ internal static class LinuxCertificateHelper
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                LogNssTrustFailure(logger, nssDir, ex.Message, leftoverEntry: false);
+                LogNssTrustFailure(logger, nssDir, ex.Message, NssLookup.Absent);
                 return false;
             }
             error = Execute(new(certutil, ["-N", "-d", db, "--empty-password"]), redirectOutput: true).Error;
             if (error.Length > 0)
             {
-                LogNssTrustFailure(logger, nssDir, error, leftoverEntry: false);
+                LogNssTrustFailure(logger, nssDir, error, NssLookup.Absent);
                 return false;
             }
         }
 
         // Replace any previous Dev Proxy root (it's regenerated per machine) so re-runs are idempotent.
-        _ = Run(new(certutil, ["-D", "-d", db, "-n", NssNickname]), logger, redirectOutput: true, logFailure: false);
-        error = Execute(new(certutil, ["-A", "-d", db, "-n", NssNickname, "-t", "C,,", "-i", pemFilePath]), redirectOutput: true).Error;
+        _ = Run(GetCertutilCommand(certutil, passwordFile, "-D", "-d", db, "-n", NssNickname), logger, redirectOutput: true, logFailure: false);
+        error = Execute(GetCertutilCommand(certutil, passwordFile, "-A", "-d", db, "-n", NssNickname, "-t", "C,,", "-i", pemFilePath), redirectOutput: true).Error;
         if (error.Length == 0)
         {
             logger.LogInformation("Certificate added to the NSS database ({Path}).", nssDir);
@@ -430,25 +477,71 @@ internal static class LinuxCertificateHelper
         }
 
         // A failed add can leave an entry without trust flags behind; try to remove it.
-        var leftoverEntry =
-            Run(new(certutil, ["-L", "-d", db, "-n", NssNickname]), logger, redirectOutput: true, logFailure: false) &&
-            !Run(new(certutil, ["-D", "-d", db, "-n", NssNickname]), logger, redirectOutput: true, logFailure: false);
-        LogNssTrustFailure(logger, nssDir, error, leftoverEntry);
+        var leftover = LookUpNssEntry(certutil, passwordFile, db);
+        if (leftover == NssLookup.Present &&
+            Run(GetCertutilCommand(certutil, passwordFile, "-D", "-d", db, "-n", NssNickname), logger, redirectOutput: true, logFailure: false))
+        {
+            leftover = NssLookup.Absent;
+        }
+        LogNssTrustFailure(logger, nssDir, error, leftover);
         return false;
     }
+
+    /// <summary>
+    /// Without a terminal, certutil is given an empty password file (<c>-f</c>) so a
+    /// password-protected database fails with SEC_ERROR_TOKEN_NOT_LOGGED_IN instead of prompting
+    /// on /dev/tty, which it does even when stdin is redirected. Databases without a password work
+    /// as usual. Returns null when interactive, so certutil can prompt.
+    /// </summary>
+    private static string? CreateNssPasswordFile()
+    {
+        if (GetContext().IsInteractive)
+        {
+            return null;
+        }
+        try
+        {
+            return WriteTempFile(string.Empty);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    internal static LinuxCommand GetCertutilCommand(string certutil, string? passwordFile, params string[] arguments) =>
+        new(certutil, passwordFile is null ? arguments : [.. arguments, "-f", passwordFile]);
+
+    private static NssLookup LookUpNssEntry(string certutil, string? passwordFile, string db)
+    {
+        var (succeeded, error) = Execute(GetCertutilCommand(certutil, passwordFile, "-L", "-d", db, "-n", NssNickname), redirectOutput: true);
+        return ClassifyNssLookup(succeeded, error);
+    }
+
+    /// <summary>Only certutil's "not found" error means there's no entry; other errors mean it couldn't check.</summary>
+    internal static NssLookup ClassifyNssLookup(bool succeeded, string error) =>
+        succeeded ? NssLookup.Present
+        : error.Contains("PR_FILE_NOT_FOUND_ERROR", StringComparison.Ordinal) ? NssLookup.Absent
+        : NssLookup.Unknown;
 
     internal static string FormatToolError(string error) =>
         string.Join(' ', error.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)).TrimEnd('.');
 
-    private static void LogNssTrustFailure(ILogger logger, string nssDir, string error, bool leftoverEntry)
+    private static void LogNssTrustFailure(ILogger logger, string nssDir, string error, NssLookup leftover)
     {
         logger.LogWarning(
             "The system certificate store trusts the Dev Proxy root certificate, but Chrome and other NSS-based apps don't: couldn't add it to the NSS database ({Path}): {Error}. If the database has a password, run 'devproxy cert ensure' in an interactive terminal. Otherwise, check that you can write to it.",
             nssDir, FormatToolError(error));
-        if (leftoverEntry)
+        if (leftover == NssLookup.Present)
         {
             logger.LogWarning(
                 "The NSS database still has a '{Nickname}' entry that couldn't be removed. Remove it with: certutil -D -d sql:{Path} -n \"{Nickname}\"",
+                NssNickname, nssDir, NssNickname);
+        }
+        else if (leftover == NssLookup.Unknown)
+        {
+            logger.LogWarning(
+                "Couldn't check whether the NSS database has a '{Nickname}' entry left without trust. If it does, remove it with: certutil -D -d sql:{Path} -n \"{Nickname}\"",
                 NssNickname, nssDir, NssNickname);
         }
     }
@@ -472,16 +565,41 @@ internal static class LinuxCertificateHelper
             return true;
         }
 
+        var passwordFile = CreateNssPasswordFile();
+        try
+        {
+            return RemoveFromNssDatabases(certutil, nssDirs, passwordFile, logger);
+        }
+        finally
+        {
+            if (passwordFile is not null)
+            {
+                CleanupFile(passwordFile);
+            }
+        }
+    }
+
+    private static bool RemoveFromNssDatabases(string certutil, string[] nssDirs, string? passwordFile, ILogger logger)
+    {
         var removed = true;
         foreach (var nssDir in nssDirs)
         {
             var db = $"sql:{nssDir}";
             // Only attempt (and report failures of) removal when the certificate is there.
-            if (!Run(new(certutil, ["-L", "-d", db, "-n", NssNickname]), logger, redirectOutput: true, logFailure: false))
+            var lookup = LookUpNssEntry(certutil, passwordFile, db);
+            if (lookup == NssLookup.Absent)
             {
                 continue;
             }
-            if (Run(new(certutil, ["-D", "-d", db, "-n", NssNickname]), logger, redirectOutput: true))
+            if (lookup == NssLookup.Unknown)
+            {
+                removed = false;
+                logger.LogError(
+                    "Couldn't check the NSS database ({Path}) for the Dev Proxy root certificate. If it's there, remove '{Nickname}' manually.",
+                    nssDir, NssNickname);
+                continue;
+            }
+            if (Run(GetCertutilCommand(certutil, passwordFile, "-D", "-d", db, "-n", NssNickname), logger, redirectOutput: true))
             {
                 logger.LogInformation("Certificate removed from the NSS database ({Path}).", nssDir);
             }
@@ -664,20 +782,6 @@ internal static class LinuxCertificateHelper
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
         {
             logger.LogError(ex, "Failed to export the root certificate to PEM");
-            return null;
-        }
-    }
-
-    /// <summary>Copies an existing anchor so it can be restored; null when there's none or it can't be read.</summary>
-    private static string? BackupFile(string path, ILogger logger)
-    {
-        try
-        {
-            return File.Exists(path) ? WriteTempFile(File.ReadAllText(path)) : null;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            logger.LogDebug(ex, "Couldn't back up {Path}", path);
             return null;
         }
     }

@@ -364,6 +364,43 @@ public class LinuxCertificateHelperTests
     }
 
     [Fact]
+    public void GetBackupCommand_CopiesAnchorPrivately()
+    {
+        var command = LinuxCertificateHelper.GetBackupCommand(_debian, "/tmp/devproxy-x/previous.crt");
+
+        Assert.Equal("install", command.FileName);
+        Assert.Equal(["-m", "0600", "/usr/local/share/ca-certificates/devproxy-ca.crt", "/tmp/devproxy-x/previous.crt"], command.Arguments);
+    }
+
+    // Without a terminal, certutil gets an empty password file so a password-protected database
+    // fails (SEC_ERROR_TOKEN_NOT_LOGGED_IN) instead of prompting on /dev/tty.
+    [Fact]
+    public void GetCertutilCommand_AddsPasswordFileWhenGiven()
+    {
+        var command = LinuxCertificateHelper.GetCertutilCommand("/usr/bin/certutil", "/tmp/pw", "-L", "-d", "sql:/db", "-n", "Dev Proxy CA");
+
+        Assert.Equal(["-L", "-d", "sql:/db", "-n", "Dev Proxy CA", "-f", "/tmp/pw"], command.Arguments);
+    }
+
+    [Fact]
+    public void GetCertutilCommand_NoPasswordFileWhenInteractive()
+    {
+        var command = LinuxCertificateHelper.GetCertutilCommand("/usr/bin/certutil", null, "-D", "-d", "sql:/db", "-n", "Dev Proxy CA");
+
+        Assert.Equal(["-D", "-d", "sql:/db", "-n", "Dev Proxy CA"], command.Arguments);
+    }
+
+    [Theory]
+    [InlineData(true, "", "Present")]
+    [InlineData(false, "certutil: Could not find cert: Dev Proxy CA\n: PR_FILE_NOT_FOUND_ERROR: File not found", "Absent")]
+    [InlineData(false, "certutil: function failed: SEC_ERROR_BAD_DATABASE: security library: bad database.", "Unknown")]
+    [InlineData(false, "certutil: SEC_ERROR_TOKEN_NOT_LOGGED_IN", "Unknown")]
+    public void ClassifyNssLookup_OnlyNotFoundMeansAbsent(bool succeeded, string error, string expected)
+    {
+        Assert.Equal(Enum.Parse<NssLookup>(expected), LinuxCertificateHelper.ClassifyNssLookup(succeeded, error));
+    }
+
+    [Fact]
     public void GetTrustRollback_NothingWhenAnchorAlreadyHoldsCertificate()
     {
         Assert.Null(LinuxCertificateHelper.GetTrustRollback(_debian, anchorHoldsCertificate: true, backupPath: null));
