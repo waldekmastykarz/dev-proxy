@@ -244,9 +244,9 @@ public sealed class OpenAILanguageModelClient(
             return false;
         }
 
-        return string.Equals(modelId, Configuration.Model, StringComparison.OrdinalIgnoreCase) ||
+        return string.Equals(modelId, Configuration.Model, StringComparison.Ordinal) ||
             // Ollama lists models with their tag, eg. llama3.2:latest
-            string.Equals(modelId, $"{Configuration.Model}:latest", StringComparison.OrdinalIgnoreCase);
+            string.Equals(modelId, $"{Configuration.Model}:latest", StringComparison.Ordinal);
     }
 
     private async Task<OpenAIChatCompletionResponse?> GenerateChatCompletionInternalAsync(OpenAIChatCompletionMessage[] messages, CompletionOptions? options, CancellationToken cancellationToken = default)

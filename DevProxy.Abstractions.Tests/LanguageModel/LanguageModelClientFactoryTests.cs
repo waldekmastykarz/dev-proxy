@@ -25,11 +25,13 @@ public class LanguageModelClientFactoryTests
     [Fact]
     public async Task Create_DoesNotFollowRedirects_SoCredentialsStayOnOrigin()
     {
+        // Start the origin listener before reserving the second port so the OS
+        // can't hand out the same port twice
         var originPort = GetFreePort();
-        var otherPort = GetFreePort();
         using var origin = new HttpListener();
         origin.Prefixes.Add($"http://127.0.0.1:{originPort}/");
         origin.Start();
+        var otherPort = GetFreePort();
         using var other = new HttpListener();
         other.Prefixes.Add($"http://127.0.0.1:{otherPort}/");
         other.Start();
@@ -84,6 +86,7 @@ public class LanguageModelClientFactoryTests
         using var serviceProvider = new ServiceCollection()
             .AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance)
             .AddSingleton(typeof(ILogger<>), typeof(Logger<>))
+            .AddKeyedSingleton(LanguageModelClientFactory.HttpClientServiceKey, (_, _) => LanguageModelClientFactory.CreateHttpClient())
             .BuildServiceProvider();
 
         var client = LanguageModelClientFactory.Create(serviceProvider, configuration);

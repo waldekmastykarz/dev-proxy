@@ -171,6 +171,20 @@ public class OpenAILanguageModelClientTests
     }
 
     [Fact]
+    public async Task IsEnabled_ModelListedWithDifferentCase_FallsBackToCompletion()
+    {
+        var config = Config();
+        config.Model = "GPT-4.1-mini";
+        var (client, handler) = CreateClient(config, r =>
+            r.Method == HttpMethod.Get
+                ? Json(HttpStatusCode.OK, """{"data":[{"id":"gpt-4.1-mini"}]}""")
+                : Json(HttpStatusCode.OK, ChatCompletionResponse));
+
+        Assert.True(await client.IsEnabledAsync(CancellationToken.None));
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
     public async Task IsEnabled_ModelNotListed_FallsBackToCompletion()
     {
         var (client, handler) = CreateClient(Config(), r =>

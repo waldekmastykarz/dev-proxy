@@ -9,6 +9,10 @@ namespace DevProxy.Abstractions.LanguageModel;
 
 public static class LanguageModelClientFactory
 {
+    // Register an HttpClient created with CreateHttpClient() under this key
+    // so that the container owns and disposes it
+    public const string HttpClientServiceKey = "DevProxy.LanguageModel";
+
     public static ILanguageModelClient Create(IServiceProvider serviceProvider, IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(serviceProvider);
@@ -17,7 +21,7 @@ public static class LanguageModelClientFactory
         var lmSection = configuration.GetSection("LanguageModel");
         var config = lmSection?.Get<LanguageModelConfiguration>() ?? new();
 
-        var httpClient = CreateHttpClient();
+        var httpClient = serviceProvider.GetKeyedService<HttpClient>(HttpClientServiceKey) ?? CreateHttpClient();
 
         return config.Client switch
         {
@@ -31,7 +35,7 @@ public static class LanguageModelClientFactory
     // Redirects are disabled so that credentials (eg. the api-key header,
     // which HttpClient doesn't strip on redirect) aren't forwarded to
     // another origin
-    internal static HttpClient CreateHttpClient() =>
+    public static HttpClient CreateHttpClient() =>
 #pragma warning disable CA2000 // The handler is owned by the long-lived HttpClient
         new(new SocketsHttpHandler
         {
