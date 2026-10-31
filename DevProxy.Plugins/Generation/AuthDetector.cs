@@ -93,7 +93,7 @@ internal static class AuthDetector
 
         var query = HttpUtility.ParseQueryString(requestUri.Query);
         return query.AllKeys
-            .FirstOrDefault(k => k is not null && Models.Http.AuthHeaders.Contains(k.ToLowerInvariant()));
+            .FirstOrDefault(k => k is not null && Models.Http.AuthQueryParameters.Contains(k.ToLowerInvariant()));
     }
 
     private static DetectedAuth DetectAuthorizationAuth(string bearerToken, ILogger logger)

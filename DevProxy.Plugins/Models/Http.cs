@@ -241,6 +241,17 @@ internal static class Http
         "code"
     ];
 
+    internal static readonly string[] AuthQueryParameters =
+    [
+        "access_token",
+        "api_key",
+        "apikey",
+        "code",
+        "key",
+        "sig",
+        "subscription-key"
+    ];
+
     internal static readonly string[] SensitiveQueryParameters =
     [
         "access_token",

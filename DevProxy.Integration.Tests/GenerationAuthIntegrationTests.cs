@@ -282,6 +282,36 @@ public sealed class GenerationAuthIntegrationTests
         Assert.NotNull(Assert.Single(security)!["ApiKeyAuth_header_x-api-key"]);
     }
 
+    [Theory]
+    [InlineData("access_token")]
+    [InlineData("subscription-key")]
+    [InlineData("sig")]
+    public async Task OpenApiSpecGenerator_AuthQueryParameter_EmitsApiKeySchemeAndSkipsParameter(string name)
+    {
+        var doc = await GenerateOpenApiJsonAsync([Exchange($"https://api.contoso.com/users?{name}=secret-value&top=10")]);
+
+        var scheme = SecurityScheme(doc, $"ApiKeyAuth_query_{name}");
+        Assert.Equal("query", scheme["in"]!.GetValue<string>());
+        Assert.Equal(name, scheme["name"]!.GetValue<string>());
+        var parameters = Operation(doc)["parameters"]?.AsArray().Select(p => p!["name"]!.GetValue<string>()) ?? [];
+        Assert.DoesNotContain(name, parameters);
+    }
+
+    [Fact]
+    public async Task OpenApiSpecGenerator_QueryAccessTokenAndBearerCalls_KeepAuthRequired()
+    {
+        var doc = await GenerateOpenApiJsonAsync([
+            Exchange("https://api.contoso.com/users?access_token=abc"),
+            Exchange("https://api.contoso.com/users", ("Authorization", "Bearer opaque-token")),
+        ]);
+
+        var security = Operation(doc)["security"]!.AsArray();
+        Assert.Equal(2, security.Count);
+        Assert.NotNull(security[0]!["ApiKeyAuth_query_access_token"]);
+        Assert.NotNull(security[1]!["BearerAuth"]);
+        Assert.DoesNotContain(security, r => r!.AsObject().Count == 0);
+    }
+
     [Fact]
     public async Task OpenApiSpecGenerator_UnderscoreApiKeyQueryParameter_EmitsApiKeyScheme()
     {
@@ -422,6 +452,15 @@ public sealed class GenerationAuthIntegrationTests
         Assert.Contains("type: OAuth2FlowType.clientCredentials;", tsp, StringComparison.Ordinal);
         Assert.Contains($"tokenUrl: \"{EntraBaseUrl}oauth2/token\";", tsp, StringComparison.Ordinal);
         Assert.DoesNotContain("sts.windows.net", tsp, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TypeSpecGenerator_AccessTokenQueryParameter_UsesApiKeyAuth()
+    {
+        var tsp = await GenerateTypeSpecAsync([Exchange("https://api.contoso.com/users?access_token=abc")]);
+
+        Assert.Contains("ApiKeyAuth<ApiKeyLocation.query, \"access_token\">", tsp, StringComparison.Ordinal);
+        Assert.DoesNotContain("@query access_token", tsp, StringComparison.Ordinal);
     }
 
     [Fact]

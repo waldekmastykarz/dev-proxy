@@ -575,7 +575,9 @@ public sealed class TypeSpecGeneratorPlugin(
             var query = HttpUtility.ParseQueryString(url.Query);
             foreach (string key in query.Keys)
             {
-                if (Models.Http.AuthHeaders.Contains(key.ToLowerInvariant()))
+                var lowerCaseKey = key.ToLowerInvariant();
+                if (Models.Http.AuthHeaders.Contains(lowerCaseKey) ||
+                    Models.Http.AuthQueryParameters.Contains(lowerCaseKey))
                 {
                     Logger.LogDebug("Skipping auth header: {Key}", key);
                     continue;
