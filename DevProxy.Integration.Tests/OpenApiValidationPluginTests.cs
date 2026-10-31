@@ -839,6 +839,89 @@ public sealed class OpenApiValidationPluginTests : IDisposable
     }
 
     [Fact]
+    public async Task ReportsMethodNotDocumentedOnMoreSpecificLiteralPath()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("literal.yaml", """
+            openapi: 3.0.3
+            info: { title: Literal, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /users/me:
+                get:
+                  responses: { '204': { description: ok } }
+              /users/{id}:
+                post:
+                  parameters:
+                    - { name: id, in: path, required: true, schema: { type: string } }
+                  responses: { '204': { description: ok } }
+            """));
+
+        var result = plugin.Validate(Call("POST", "https://api.fabrikam.com/users/me").Session);
+
+        Assert.Equal("Method POST isn't documented for path '/users/me'", Assert.Single(Messages(result)));
+    }
+
+    [Fact]
+    public async Task RejectsNullNotInEnumForOpenApi31TypeArrays()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("nullenum.yaml", """
+            openapi: 3.1.0
+            info: { title: Null enum, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                get:
+                  responses:
+                    '200':
+                      description: ok
+                      content:
+                        application/json:
+                          schema: { type: [string, 'null'], enum: [active, inactive] }
+            """));
+
+        var result = plugin.Validate(TestExchange.Request("GET", "https://api.fabrikam.com/items")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: "null").Session);
+
+        Assert.Contains("isn't one of the allowed values", Assert.Single(Messages(result)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExemptsReadOnlyPropertiesDeclaredInComposedSchemas()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("readonly.yaml", """
+            openapi: 3.0.3
+            info: { title: Read-only, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                post:
+                  requestBody:
+                    content:
+                      application/json:
+                        schema:
+                          required: [id, name]
+                          allOf:
+                            - $ref: '#/components/schemas/Base'
+                            - { type: object, properties: { name: { type: string } } }
+                  responses: { '204': { description: ok } }
+            components:
+              schemas:
+                Base: { type: object, properties: { id: { type: integer, readOnly: true } } }
+            """));
+
+        var valid = plugin.Validate(TestExchange.Request("POST", "https://api.fabrikam.com/items",
+            headers: [("Content-Type", "application/json")], body: """{"name":"Alex"}""").WithResponse(HttpStatusCode.NoContent).Session);
+        var invalid = plugin.Validate(TestExchange.Request("POST", "https://api.fabrikam.com/items",
+            headers: [("Content-Type", "application/json")], body: """{"id":1}""").WithResponse(HttpStatusCode.NoContent).Session);
+
+        Assert.Empty(valid!.Issues);
+        Assert.Equal("$: Missing required property 'name'", Assert.Single(Messages(invalid)));
+    }
+
+    [Fact]
     public async Task ReportsSchemasExceedingMaxDepth()
     {
         var schemas = string.Join(",\n", Enumerable.Range(0, 70).Select(i =>

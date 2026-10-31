@@ -35,6 +35,7 @@ internal static class OpenApiSchemaValidator
     {
         public int Evaluations { get; set; }
         public bool BudgetExceeded { get; set; }
+        public bool StrictNullableEnums { get; init; }
         public Dictionary<(IOpenApiSchema Schema, string Path, int Depth), List<SchemaValidationError>> Memo { get; } = [];
     }
 
@@ -42,10 +43,11 @@ internal static class OpenApiSchemaValidator
         JsonElement value,
         IOpenApiSchema? schema,
         SchemaValidationDirection direction,
-        string path = "$")
+        string path = "$",
+        bool strictNullableEnums = false)
     {
         var errors = new List<SchemaValidationError>();
-        var state = new ValidationState();
+        var state = new ValidationState { StrictNullableEnums = strictNullableEnums };
         ValidateCore(value, schema, direction, path, errors, state, 0);
         if (state.BudgetExceeded)
         {
@@ -58,10 +60,11 @@ internal static class OpenApiSchemaValidator
         JsonNode? value,
         IOpenApiSchema? schema,
         SchemaValidationDirection direction,
-        string path = "$")
+        string path = "$",
+        bool strictNullableEnums = false)
     {
         using var doc = JsonDocument.Parse(value?.ToJsonString() ?? "null");
-        return Validate(doc.RootElement.Clone(), schema, direction, path);
+        return Validate(doc.RootElement.Clone(), schema, direction, path, strictNullableEnums);
     }
 
     /// <summary>
@@ -203,6 +206,36 @@ internal static class OpenApiSchemaValidator
     private static IOpenApiSchema ResolveTarget(IOpenApiSchema schema) =>
         schema is OpenApiSchemaReference reference ? (IOpenApiSchema?)reference.Target ?? schema : schema;
 
+    // Finds the declarations of the property in the schema and its allOf
+    // subschemas (incl. references), which all apply to the value
+    private static IEnumerable<IOpenApiSchema> FindAllOfPropertySchemas(IOpenApiSchema schema, string propertyName)
+    {
+        var visited = new HashSet<IOpenApiSchema>(ReferenceEqualityComparer.Instance);
+        var stack = new Stack<(IOpenApiSchema Schema, int Depth)>();
+        stack.Push((schema, 0));
+        while (stack.Count > 0)
+        {
+            var (current, depth) = stack.Pop();
+            if (!visited.Add(ResolveTarget(current)))
+            {
+                continue;
+            }
+
+            if (current.Properties?.TryGetValue(propertyName, out var propertySchema) == true)
+            {
+                yield return propertySchema;
+            }
+
+            if (depth < MaxDepth)
+            {
+                foreach (var subSchema in current.AllOf ?? [])
+                {
+                    stack.Push((subSchema, depth + 1));
+                }
+            }
+        }
+    }
+
     private static bool IsDeclaredInSibling(IList<IOpenApiSchema> allOf, int index, string propertyName) =>
         allOf.Where((_, i) => i != index)
             .Any(s => GetPropertyNames(s).Contains(propertyName, StringComparer.Ordinal));
@@ -271,7 +304,7 @@ internal static class OpenApiSchemaValidator
             return;
         }
 
-        ValidateEnum(value, schema, path, errors);
+        ValidateEnum(value, schema, path, errors, state.StrictNullableEnums);
 
         if (value.ValueKind == JsonValueKind.Object)
         {
@@ -390,7 +423,7 @@ internal static class OpenApiSchemaValidator
         value.TryGetInt64(out _) ||
         (value.TryGetDecimal(out var d) && decimal.Truncate(d) == d);
 
-    private static void ValidateEnum(JsonElement value, IOpenApiSchema schema, string path, List<SchemaValidationError> errors)
+    private static void ValidateEnum(JsonElement value, IOpenApiSchema schema, string path, List<SchemaValidationError> errors, bool strictNullableEnums)
     {
         if (schema.Enum is not { Count: > 0 })
         {
@@ -403,8 +436,10 @@ internal static class OpenApiSchemaValidator
             return;
         }
 
-        // OAS 3.0 nullable enums: null is allowed if the schema allows null
-        if (node is null && schema.Type is { } type && type.HasFlag(JsonSchemaType.Null))
+        // OAS 3.0 nullable enums: null is allowed if the schema allows null.
+        // Microsoft.OpenApi maps 'nullable' to the null type, so this can't be
+        // distinguished from OAS 3.1, where null must be listed in the enum
+        if (!strictNullableEnums && node is null && schema.Type is { } type && type.HasFlag(JsonSchemaType.Null))
         {
             return;
         }
@@ -433,11 +468,9 @@ internal static class OpenApiSchemaValidator
 
                 // readOnly properties aren't sent in requests, writeOnly
                 // properties aren't returned in responses
-                IOpenApiSchema? propertySchema = null;
-                _ = schema.Properties?.TryGetValue(requiredProperty, out propertySchema);
-                if (propertySchema is not null &&
-                    ((direction == SchemaValidationDirection.Request && propertySchema.ReadOnly) ||
-                     (direction == SchemaValidationDirection.Response && propertySchema.WriteOnly)))
+                if (FindAllOfPropertySchemas(schema, requiredProperty).Any(propertySchema =>
+                    (direction == SchemaValidationDirection.Request && propertySchema.ReadOnly) ||
+                    (direction == SchemaValidationDirection.Response && propertySchema.WriteOnly)))
                 {
                     continue;
                 }

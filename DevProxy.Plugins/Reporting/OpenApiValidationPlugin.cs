@@ -270,11 +270,12 @@ public sealed class OpenApiValidationPlugin(
             };
         }
 
+        var strict = match.Spec.StrictNullableEnums;
         ValidateParameters(request, match, issues);
-        ValidateRequestBody(request, match.Operation, issues, notes);
+        ValidateRequestBody(request, match.Operation, issues, notes, strict);
         if (response is not null)
         {
-            ValidateResponse(response, match.Operation, issues, notes);
+            ValidateResponse(response, match.Operation, issues, notes, strict);
         }
 
         return new()
@@ -317,18 +318,18 @@ public sealed class OpenApiValidationPlugin(
                     relativePath = "/";
                 }
 
-                var matchedAnyPath = false;
-                foreach (var (path, pathValues) in FindPaths(server, relativePath))
+                // paths are ordered from the most specific, which takes precedence
+                // per the OpenAPI spec, even if it doesn't document the method
+                var bestPath = FindPaths(server, relativePath).FirstOrDefault();
+                if (bestPath.Path is { } path)
                 {
-                    matchedAnyPath = true;
                     if (path.Operations.TryGetValue(method, out var operation))
                     {
-                        return new OperationMatch(spec, relativePath, path.Template, path.PathItem, operation, pathValues);
+                        return new OperationMatch(spec, relativePath, path.Template, path.PathItem, operation, bestPath.PathValues);
                     }
-                    firstPathMatch ??= new OperationMatch(spec, relativePath, path.Template, path.PathItem, null, pathValues);
+                    firstPathMatch ??= new OperationMatch(spec, relativePath, path.Template, path.PathItem, null, bestPath.PathValues);
                 }
-
-                if (!matchedAnyPath)
+                else
                 {
                     firstServerMatch ??= new OperationMatch(spec, relativePath, null, null, null, []);
                 }
@@ -425,7 +426,7 @@ public sealed class OpenApiValidationPlugin(
 
             ValidateParameterValue(parameter.Name, $"{locationName} parameter", values, parameter.Schema,
                 parameter.Style ?? GetDefaultStyle(parameter.In.Value), parameter.Explode,
-                OpenApiValidationIssueLocation.Request, issues);
+                OpenApiValidationIssueLocation.Request, issues, match.Spec.StrictNullableEnums);
         }
 
         // unknown query parameters
@@ -496,7 +497,8 @@ public sealed class OpenApiValidationPlugin(
     }
 
     private static void ValidateParameterValue(string name, string kind, List<string> values, IOpenApiSchema? schema,
-        ParameterStyle style, bool explode, OpenApiValidationIssueLocation location, List<OpenApiValidationIssue> issues)
+        ParameterStyle style, bool explode, OpenApiValidationIssueLocation location, List<OpenApiValidationIssue> issues,
+        bool strictNullableEnums)
     {
         if (schema is null || OpenApiSchemaValidator.GetEffectiveType(schema) == JsonSchemaType.Object)
         {
@@ -507,13 +509,13 @@ public sealed class OpenApiValidationPlugin(
         var direction = location == OpenApiValidationIssueLocation.Request
             ? SchemaValidationDirection.Request
             : SchemaValidationDirection.Response;
-        var errors = OpenApiSchemaValidator.Validate(value, schema, direction, name);
+        var errors = OpenApiSchemaValidator.Validate(value, schema, direction, name, strictNullableEnums);
         if (errors.Count > 0)
         {
             // the value might be valid as a string when the schema allows
             // multiple types, e.g. anyOf: [{ type: integer, enum: [1] }, { type: string }]
             var raw = OpenApiSchemaValidator.CoerceParameterValue(values, schema, name, style, explode, coerce: false);
-            if (OpenApiSchemaValidator.Validate(raw, schema, direction, name).Count == 0)
+            if (OpenApiSchemaValidator.Validate(raw, schema, direction, name, strictNullableEnums).Count == 0)
             {
                 return;
             }
@@ -530,7 +532,7 @@ public sealed class OpenApiValidationPlugin(
         }
     }
 
-    private static void ValidateRequestBody(IHttpRequest request, OpenApiOperation operation, List<OpenApiValidationIssue> issues, List<string> notes)
+    private static void ValidateRequestBody(IHttpRequest request, OpenApiOperation operation, List<OpenApiValidationIssue> issues, List<string> notes, bool strictNullableEnums)
     {
         var requestBody = operation.RequestBody;
         var hasBody = request.Body.Length > 0;
@@ -558,10 +560,10 @@ public sealed class OpenApiValidationPlugin(
             return;
         }
 
-        ValidateBody(request, requestBody.Content, OpenApiValidationIssueLocation.Request, issues, notes);
+        ValidateBody(request, requestBody.Content, OpenApiValidationIssueLocation.Request, issues, notes, strictNullableEnums);
     }
 
-    private static void ValidateResponse(IHttpResponse response, OpenApiOperation operation, List<OpenApiValidationIssue> issues, List<string> notes)
+    private static void ValidateResponse(IHttpResponse response, OpenApiOperation operation, List<OpenApiValidationIssue> issues, List<string> notes, bool strictNullableEnums)
     {
         var statusCode = ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture);
         var responses = operation.Responses;
@@ -608,7 +610,7 @@ public sealed class OpenApiValidationPlugin(
 
             ValidateParameterValue(headerName, "response header", values, header.Schema,
                 header.Style ?? ParameterStyle.Simple, header.Explode,
-                OpenApiValidationIssueLocation.Response, issues);
+                OpenApiValidationIssueLocation.Response, issues, strictNullableEnums);
         }
 
         if (response.Body.Length == 0)
@@ -626,11 +628,11 @@ public sealed class OpenApiValidationPlugin(
             return;
         }
 
-        ValidateBody(response, specResponse.Content, OpenApiValidationIssueLocation.Response, issues, notes);
+        ValidateBody(response, specResponse.Content, OpenApiValidationIssueLocation.Response, issues, notes, strictNullableEnums);
     }
 
     private static void ValidateBody(IHttpMessage message, IDictionary<string, IOpenApiMediaType>? content,
-        OpenApiValidationIssueLocation location, List<OpenApiValidationIssue> issues, List<string> notes)
+        OpenApiValidationIssueLocation location, List<OpenApiValidationIssue> issues, List<string> notes, bool strictNullableEnums)
     {
         if (content is not { Count: > 0 })
         {
@@ -694,7 +696,7 @@ public sealed class OpenApiValidationPlugin(
             var direction = location == OpenApiValidationIssueLocation.Request
                 ? SchemaValidationDirection.Request
                 : SchemaValidationDirection.Response;
-            foreach (var error in OpenApiSchemaValidator.Validate(json.RootElement, mediaType.Schema, direction))
+            foreach (var error in OpenApiSchemaValidator.Validate(json.RootElement, mediaType.Schema, direction, strictNullableEnums: strictNullableEnums))
             {
                 issues.Add(new()
                 {
@@ -808,6 +810,7 @@ public sealed class OpenApiValidationPlugin(
             Logger.LogDebug("Loading OpenAPI spec from '{File}'...", file);
             OpenApiDocument? document;
             string? diagnostics;
+            var strictNullableEnums = false;
             try
             {
                 var fileContents = await File.ReadAllTextAsync(file, cancellationToken);
@@ -817,6 +820,7 @@ public sealed class OpenApiValidationPlugin(
                 settings.AddYamlReader();
                 var readResult = OpenApiDocument.Parse(fileContents, null, settings);
                 document = readResult.Document;
+                strictNullableEnums = readResult.Diagnostic?.SpecificationVersion >= OpenApiSpecVersion.OpenApi3_1;
                 diagnostics = readResult.Diagnostic?.Errors is { Count: > 0 } errors
                     ? string.Join("; ", errors.Select(e => e.ToString()))
                     : null;
@@ -840,7 +844,7 @@ public sealed class OpenApiValidationPlugin(
                 continue;
             }
 
-            specs.Add(new LoadedSpec(file, servers));
+            specs.Add(new LoadedSpec(file, servers, strictNullableEnums));
             Logger.LogInformation("Loaded OpenAPI spec '{File}'", file);
         }
 
@@ -961,7 +965,8 @@ public sealed class OpenApiValidationPlugin(
 
     private sealed record ServerScope(Regex Regex, List<CompiledPath> Paths);
 
-    private sealed record LoadedSpec(string FilePath, List<ServerScope> Servers);
+    // OAS 3.1 requires null to be listed in enums, unlike OAS 3.0 nullable enums
+    private sealed record LoadedSpec(string FilePath, List<ServerScope> Servers, bool StrictNullableEnums);
 
     private sealed record OperationMatch(
         LoadedSpec Spec,
