@@ -127,7 +127,7 @@ internal sealed class RootCertificateTrust(
         }
         else if (OperatingSystem.IsLinux())
         {
-            LinuxCertificateHelper.RemoveTrustedCertificate(logger);
+            LinuxCertificateHelper.RemoveTrustedCertificate(rootCertificate, logger);
         }
         else
         {

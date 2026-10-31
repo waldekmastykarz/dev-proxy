@@ -2,6 +2,8 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using DevProxy.Proxy;
 using Xunit;
 
@@ -23,6 +25,8 @@ public class LinuxCertificateHelperTests
 
         Assert.NotNull(store);
         Assert.Equal("/usr/local/share/ca-certificates/devproxy-ca.crt", store.CertificatePath);
+        Assert.Equal("/usr/local/share/ca-certificates/dev-proxy-ca.crt", store.LegacyCertificatePath);
+        Assert.Equal("/etc/ssl/certs/ca-certificates.crt", store.BundlePath);
         Assert.Equal("/usr/sbin/update-ca-certificates", store.UpdateCommand);
         Assert.Empty(store.UpdateArguments);
         Assert.Equal(["--fresh"], store.RemoveUpdateArguments);
@@ -37,6 +41,7 @@ public class LinuxCertificateHelperTests
 
         Assert.NotNull(store);
         Assert.Equal("/etc/pki/ca-trust/source/anchors/devproxy-ca.crt", store.CertificatePath);
+        Assert.Equal("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", store.BundlePath);
         Assert.Equal("/usr/sbin/update-ca-trust", store.UpdateCommand);
         Assert.Equal(["extract"], store.UpdateArguments);
     }
@@ -50,6 +55,7 @@ public class LinuxCertificateHelperTests
 
         Assert.NotNull(store);
         Assert.Equal("/etc/ca-certificates/trust-source/anchors/devproxy-ca.crt", store.CertificatePath);
+        Assert.Equal("/etc/ca-certificates/extracted/tls-ca-bundle.pem", store.BundlePath);
     }
 
     [Fact]
@@ -103,12 +109,33 @@ public class LinuxCertificateHelperTests
         Assert.Equal(["-n", "--", "rm", "-f", "x"], elevated.Arguments);
     }
 
+    private static readonly LinuxTrustStore _fedora = new("Fedora/RHEL", "/etc/pki/ca-trust/source/anchors", "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", "/usr/bin/update-ca-trust", ["extract"], ["extract"]);
+    private static readonly LinuxTrustStore _debian = new("Debian/Ubuntu", "/usr/local/share/ca-certificates", "/etc/ssl/certs/ca-certificates.crt", "/usr/sbin/update-ca-certificates", [], ["--fresh"]);
+
+    [Fact]
+    public void FindSystemExecutable_IgnoresPath()
+    {
+        var dir = Directory.CreateTempSubdirectory();
+        try
+        {
+            var name = $"devproxy-test-{Guid.NewGuid():N}";
+            File.WriteAllText(Path.Combine(dir.FullName, name), string.Empty);
+
+            Assert.NotNull(LinuxCertificateHelper.FindExecutable(name, dir.FullName));
+            Assert.Null(LinuxCertificateHelper.FindSystemExecutable(name));
+        }
+        finally
+        {
+            dir.Delete(true);
+        }
+    }
+
     [Fact]
     public void GetTrustCommands_InstallsThenRefreshes()
     {
-        var store = new LinuxTrustStore("Fedora/RHEL", "/etc/pki/ca-trust/source/anchors", "/usr/bin/update-ca-trust", ["extract"], ["extract"]);
+        var store = _fedora;
 
-        var commands = LinuxCertificateHelper.GetTrustCommands(store, "/tmp/cert.crt");
+        var commands = LinuxCertificateHelper.GetTrustCommands(store, "/tmp/cert.crt", removeLegacy: false);
 
         Assert.Equal(2, commands.Count);
         Assert.Equal("install", commands[0].FileName);
@@ -118,11 +145,69 @@ public class LinuxCertificateHelperTests
     }
 
     [Fact]
+    public void GetTrustCommands_RemovesLegacyAnchorBeforeRefresh()
+    {
+        var commands = LinuxCertificateHelper.GetTrustCommands(_debian, "/tmp/cert.crt", removeLegacy: true);
+
+        Assert.Equal(["install", "rm", "/usr/sbin/update-ca-certificates"], commands.Select(c => c.FileName));
+        Assert.Equal(["-f", "/usr/local/share/ca-certificates/dev-proxy-ca.crt"], commands[1].Arguments);
+    }
+
+    [Fact]
+    public void GetUntrustCommands_RemovesLegacyAnchorBeforeRefresh()
+    {
+        var commands = LinuxCertificateHelper.GetUntrustCommands(_debian, removeLegacy: true);
+
+        Assert.Equal(["rm", "rm", "/usr/sbin/update-ca-certificates"], commands.Select(c => c.FileName));
+        Assert.Equal(["-f", "/usr/local/share/ca-certificates/dev-proxy-ca.crt"], commands[1].Arguments);
+    }
+
+    [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(true, false, false, true)]
+    [InlineData(false, true, false, true)]
+    [InlineData(false, false, true, true)]
+    public void NeedsSystemStoreRemoval(bool anchorExists, bool legacyMatches, bool bundleContains, bool expected) =>
+        Assert.Equal(expected, LinuxCertificateHelper.NeedsSystemStoreRemoval(anchorExists, legacyMatches, bundleContains));
+
+    [Fact]
+    public void FileContainsCertificate_MatchesOnlyTheSameCertificate()
+    {
+        using var root = CreateCertificate("CN=Dev Proxy CA");
+        using var other = CreateCertificate("CN=Other CA");
+        var bundle = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(bundle, other.ExportCertificatePem() + "\n" + root.ExportCertificatePem() + "\n");
+            Assert.True(LinuxCertificateHelper.FileContainsCertificate(bundle, root));
+
+            File.WriteAllText(bundle, other.ExportCertificatePem());
+            Assert.False(LinuxCertificateHelper.FileContainsCertificate(bundle, root));
+
+            File.WriteAllText(bundle, "not a certificate");
+            Assert.False(LinuxCertificateHelper.FileContainsCertificate(bundle, root));
+        }
+        finally
+        {
+            File.Delete(bundle);
+        }
+
+        Assert.False(LinuxCertificateHelper.FileContainsCertificate(bundle, root));
+    }
+
+    private static X509Certificate2 CreateCertificate(string subject)
+    {
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest(subject, key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+    }
+
+    [Fact]
     public void GetUntrustCommands_RemovesThenRefreshes()
     {
-        var store = new LinuxTrustStore("Debian/Ubuntu", "/usr/local/share/ca-certificates", "/usr/sbin/update-ca-certificates", [], ["--fresh"]);
+        var store = _debian;
 
-        var commands = LinuxCertificateHelper.GetUntrustCommands(store);
+        var commands = LinuxCertificateHelper.GetUntrustCommands(store, removeLegacy: false);
 
         Assert.Equal(2, commands.Count);
         Assert.Equal("rm", commands[0].FileName);

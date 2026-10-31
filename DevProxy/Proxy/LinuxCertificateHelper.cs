@@ -11,11 +11,15 @@ namespace DevProxy.Proxy;
 internal sealed record LinuxTrustStore(
     string Name,
     string AnchorDirectory,
+    string BundlePath,
     string UpdateCommand,
     IReadOnlyList<string> UpdateArguments,
     IReadOnlyList<string> RemoveUpdateArguments)
 {
     public string CertificatePath => Path.Combine(AnchorDirectory, LinuxCertificateHelper.CertificateFileName);
+
+    /// <summary>Anchor that earlier manual setup instructions told users to create.</summary>
+    public string LegacyCertificatePath => Path.Combine(AnchorDirectory, LinuxCertificateHelper.LegacyCertificateFileName);
 }
 
 /// <summary>A process invocation (file name + argument list, no shell).</summary>
@@ -27,14 +31,20 @@ internal sealed record LinuxCommand(string FileName, IReadOnlyList<string> Argum
 internal static class LinuxCertificateHelper
 {
     internal const string CertificateFileName = "devproxy-ca.crt";
+    internal const string LegacyCertificateFileName = "dev-proxy-ca.crt";
     internal const string NssNickname = "Dev Proxy CA";
 
     private static readonly string[] _sbinDirectories = ["/usr/local/sbin", "/usr/sbin", "/sbin"];
 
+    // Root-owned system directories. Tools that run as root are resolved only from here,
+    // never from the caller's PATH, so a user-writable PATH entry can't be executed via sudo.
+    private static readonly string[] _systemDirectories = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"];
+
     /// <summary>
     /// Detects the system CA trust store. Supports Debian/Ubuntu (update-ca-certificates),
     /// Fedora/RHEL (update-ca-trust) and Arch (update-ca-trust with trust-source anchors).
-    /// Returns null when the distro isn't recognized.
+    /// Returns null when the distro isn't recognized. <paramref name="findExecutable"/> must
+    /// only resolve from trusted system directories because the result runs as root.
     /// </summary>
     internal static LinuxTrustStore? DetectTrustStore(
         Func<string, bool> directoryExists,
@@ -46,6 +56,7 @@ internal static class LinuxCertificateHelper
             return new(
                 "Debian/Ubuntu",
                 "/usr/local/share/ca-certificates",
+                "/etc/ssl/certs/ca-certificates.crt",
                 updateCaCertificates,
                 [],
                 ["--fresh"]);
@@ -56,12 +67,12 @@ internal static class LinuxCertificateHelper
         {
             if (directoryExists("/etc/pki/ca-trust/source/anchors"))
             {
-                return new("Fedora/RHEL", "/etc/pki/ca-trust/source/anchors", updateCaTrust, ["extract"], ["extract"]);
+                return new("Fedora/RHEL", "/etc/pki/ca-trust/source/anchors", "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", updateCaTrust, ["extract"], ["extract"]);
             }
 
             if (directoryExists("/etc/ca-certificates/trust-source/anchors"))
             {
-                return new("Arch", "/etc/ca-certificates/trust-source/anchors", updateCaTrust, ["extract"], ["extract"]);
+                return new("Arch", "/etc/ca-certificates/trust-source/anchors", "/etc/ca-certificates/extracted/tls-ca-bundle.pem", updateCaTrust, ["extract"], ["extract"]);
             }
         }
 
@@ -86,22 +97,70 @@ internal static class LinuxCertificateHelper
         return new("sudo", args);
     }
 
-    internal static IReadOnlyList<LinuxCommand> GetTrustCommands(LinuxTrustStore store, string pemFilePath) =>
-    [
-        new("install", ["-D", "-m", "0644", pemFilePath, store.CertificatePath]),
-        new(store.UpdateCommand, store.UpdateArguments),
-    ];
+    // install/rm are passed by name so sudo resolves them through its secure_path.
+    internal static IReadOnlyList<LinuxCommand> GetTrustCommands(LinuxTrustStore store, string pemFilePath, bool removeLegacy)
+    {
+        List<LinuxCommand> commands = [new("install", ["-D", "-m", "0644", pemFilePath, store.CertificatePath])];
+        if (removeLegacy)
+        {
+            commands.Add(new("rm", ["-f", store.LegacyCertificatePath]));
+        }
+        commands.Add(new(store.UpdateCommand, store.UpdateArguments));
+        return commands;
+    }
 
-    internal static IReadOnlyList<LinuxCommand> GetUntrustCommands(LinuxTrustStore store) =>
-    [
-        new("rm", ["-f", store.CertificatePath]),
-        new(store.UpdateCommand, store.RemoveUpdateArguments),
-    ];
+    internal static IReadOnlyList<LinuxCommand> GetUntrustCommands(LinuxTrustStore store, bool removeLegacy)
+    {
+        List<LinuxCommand> commands = [new("rm", ["-f", store.CertificatePath])];
+        if (removeLegacy)
+        {
+            commands.Add(new("rm", ["-f", store.LegacyCertificatePath]));
+        }
+        commands.Add(new(store.UpdateCommand, store.RemoveUpdateArguments));
+        return commands;
+    }
+
+    /// <summary>
+    /// Whether <c>cert remove</c> has anything to undo. The bundle check covers a previous
+    /// removal where the anchor was deleted but refreshing the store failed.
+    /// </summary>
+    internal static bool NeedsSystemStoreRemoval(bool anchorExists, bool legacyAnchorMatches, bool bundleContainsCertificate) =>
+        anchorExists || legacyAnchorMatches || bundleContainsCertificate;
+
+    /// <summary>Whether the PEM file at <paramref name="path"/> holds <paramref name="certificate"/>.</summary>
+    internal static bool FileContainsCertificate(string path, X509Certificate2 certificate)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+
+            var certificates = new X509Certificate2Collection();
+            certificates.ImportFromPemFile(path);
+            try
+            {
+                return certificates.Any(c => c.RawData.AsSpan().SequenceEqual(certificate.RawData));
+            }
+            finally
+            {
+                foreach (var c in certificates)
+                {
+                    c.Dispose();
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
+        {
+            return false;
+        }
+    }
 
     internal static string GetNssDatabaseDirectory() =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pki", "nssdb");
 
-    internal static LinuxTrustStore? DetectTrustStore() => DetectTrustStore(Directory.Exists, FindExecutable);
+    internal static LinuxTrustStore? DetectTrustStore() => DetectTrustStore(Directory.Exists, FindSystemExecutable);
 
     internal static bool TrustCertificate(X509Certificate2 certificate, LinuxTrustStore store, ILogger logger)
     {
@@ -120,7 +179,8 @@ internal static class LinuxCertificateHelper
                 store.CertificatePath,
                 isRoot ? string.Empty : " You might be asked for your password.");
 
-            foreach (var command in GetTrustCommands(store, pemFilePath))
+            var removeLegacy = FileContainsCertificate(store.LegacyCertificatePath, certificate);
+            foreach (var command in GetTrustCommands(store, pemFilePath, removeLegacy))
             {
                 if (!Run(Elevate(command, isRoot, isInteractive), logger, redirectOutput: false))
                 {
@@ -142,14 +202,18 @@ internal static class LinuxCertificateHelper
         }
     }
 
-    internal static void RemoveTrustedCertificate(ILogger logger)
+    internal static void RemoveTrustedCertificate(X509Certificate2 certificate, ILogger logger)
     {
         var store = DetectTrustStore();
+        var removeLegacy = store is not null && FileContainsCertificate(store.LegacyCertificatePath, certificate);
         if (store is null)
         {
             logger.LogWarning("Remove the Dev Proxy root certificate from your trust store manually.");
         }
-        else if (File.Exists(store.CertificatePath))
+        else if (NeedsSystemStoreRemoval(
+            File.Exists(store.CertificatePath),
+            removeLegacy,
+            FileContainsCertificate(store.BundlePath, certificate)))
         {
             var (isRoot, isInteractive) = GetContext();
             logger.LogInformation(
@@ -158,7 +222,7 @@ internal static class LinuxCertificateHelper
                 isRoot ? string.Empty : " You might be asked for your password.");
 
             var removed = true;
-            foreach (var command in GetUntrustCommands(store))
+            foreach (var command in GetUntrustCommands(store, removeLegacy))
             {
                 if (!Run(Elevate(command, isRoot, isInteractive), logger, redirectOutput: false))
                 {
@@ -229,10 +293,15 @@ internal static class LinuxCertificateHelper
         (Environment.UserName == "root",
          !Console.IsInputRedirected && Environment.GetEnvironmentVariable("CI") is null);
 
-    internal static string? FindExecutable(string name)
+    internal static string? FindSystemExecutable(string name) =>
+        _systemDirectories.Select(d => Path.Combine(d, name)).FirstOrDefault(File.Exists);
+
+    internal static string? FindExecutable(string name) =>
+        FindExecutable(name, Environment.GetEnvironmentVariable("PATH"));
+
+    internal static string? FindExecutable(string name, string? path)
     {
-        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-        var directories = path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+        var directories = (path ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
             .Concat(_sbinDirectories);
         foreach (var directory in directories)
         {
