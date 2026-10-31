@@ -531,6 +531,134 @@ public sealed class OpenApiValidationPluginTests : IDisposable
     }
 
     [Fact]
+    public async Task HandlesObjectQueryParameters()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("objects.yaml", """
+            openapi: 3.0.3
+            info: { title: Objects, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                get:
+                  parameters:
+                    - name: filter
+                      in: query
+                      required: true
+                      schema: { type: object, properties: { status: { type: string }, owner: { type: string } } }
+                    - { name: top, in: query, schema: { type: integer } }
+                  responses: { '204': { description: ok } }
+            """));
+
+        var exploded = plugin.Validate(Call("GET", "https://api.fabrikam.com/items?status=active&owner=me&top=5").Session);
+        var bracketed = plugin.Validate(Call("GET", "https://api.fabrikam.com/items?status=active&top[foo]=bar").Session);
+        var missing = plugin.Validate(Call("GET", "https://api.fabrikam.com/items?top=5").Session);
+
+        Assert.Empty(exploded!.Issues);
+        Assert.Equal("top[foo]: Query parameter 'top[foo]' isn't documented", Assert.Single(Messages(bracketed)));
+        Assert.Equal("filter: Missing required query parameter 'filter'", Assert.Single(Messages(missing)));
+    }
+
+    [Fact]
+    public async Task CoercesParametersUsingComposedSchemaTypes()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("composed.yaml", """
+            openapi: 3.0.3
+            info: { title: Composed, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                get:
+                  parameters:
+                    - { name: count, in: query, schema: { allOf: [ { type: integer } ] } }
+                    - { name: ids, in: query, schema: { allOf: [ { type: array, items: { allOf: [ { type: integer } ] } } ] } }
+                  responses: { '204': { description: ok } }
+            """));
+
+        var valid = plugin.Validate(Call("GET", "https://api.fabrikam.com/items?count=42&ids=1&ids=2").Session);
+        var invalid = plugin.Validate(Call("GET", "https://api.fabrikam.com/items?count=abc").Session);
+
+        Assert.Empty(valid!.Issues);
+        Assert.Contains("Expected integer", Assert.Single(Messages(invalid)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReportsInvalidJsonForMediaTypesWithoutSchema()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("noschema.yaml", """
+            openapi: 3.0.3
+            info: { title: No schema, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                get:
+                  responses:
+                    '200': { description: ok, content: { application/json: {} } }
+            """));
+
+        var valid = plugin.Validate(TestExchange.Request("GET", "https://api.fabrikam.com/items")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: "{}").Session);
+        var invalid = plugin.Validate(TestExchange.Request("GET", "https://api.fabrikam.com/items")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: "{").Session);
+
+        Assert.Empty(valid!.Issues);
+        Assert.Contains("isn't valid JSON", Assert.Single(Messages(invalid)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MatchesServersWithExplicitDefaultPorts()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("ports.yaml", """
+            openapi: 3.0.3
+            info: { title: Ports, version: '1.0' }
+            servers:
+              - url: https://api.contoso.com:443/v1
+              - url: http://api.contoso.com:80/v1
+            paths:
+              /items:
+                get:
+                  responses: { '204': { description: ok } }
+            """));
+
+        Assert.NotNull(plugin.Validate(Call("GET", "https://api.contoso.com/v1/items").Session));
+        Assert.NotNull(plugin.Validate(Call("GET", "http://api.contoso.com/v1/items").Session));
+    }
+
+    [Fact]
+    public async Task DistinguishesDottedPropertyNamesFromNestedProperties()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("dotted.yaml", """
+            openapi: 3.0.3
+            info: { title: Dotted, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items:
+                get:
+                  responses:
+                    '200':
+                      description: ok
+                      content:
+                        application/json:
+                          schema:
+                            type: object
+                            properties:
+                              a: { type: object, properties: { b: { allOf: [ { $ref: '#/components/schemas/Str' } ] } } }
+                              a.b: { allOf: [ { $ref: '#/components/schemas/Str' } ] }
+            components:
+              schemas:
+                Str: { type: string }
+            """));
+
+        var result = plugin.Validate(TestExchange.Request("GET", "https://api.fabrikam.com/items")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: """{"a":{"b":"ok"},"a.b":123}""").Session);
+
+        Assert.Equal("$[\"a.b\"]: Expected string but got integer", Assert.Single(Messages(result)));
+    }
+
+    [Fact]
     public async Task ReportsSchemasExceedingMaxDepth()
     {
         var schemas = string.Join(",\n", Enumerable.Range(0, 70).Select(i =>

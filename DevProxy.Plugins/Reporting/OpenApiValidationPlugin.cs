@@ -370,10 +370,10 @@ public sealed class OpenApiValidationPlugin(
                     {
                         values = queryValues;
                     }
-                    else if (parameter.Style == ParameterStyle.DeepObject &&
-                        query.Keys.Any(k => k.StartsWith($"{parameter.Name}[", StringComparison.Ordinal)))
+                    else if (GetObjectQueryKeys(parameter).Any(k => query.Keys.Any(k.IsMatch)))
                     {
-                        // deepObject values (e.g. filter[name]=value) aren't validated
+                        // values of deepObject (e.g. filter[name]=value) and exploded
+                        // form object (e.g. name=value) parameters aren't validated
                         continue;
                     }
                     break;
@@ -420,15 +420,16 @@ public sealed class OpenApiValidationPlugin(
             return;
         }
 
-        var knownQueryParameters = parameters
+        var queryParameters = parameters
             .Where(p => p.In == ParameterLocation.Query && p.Name is not null)
-            .Select(p => p.Name!)
+            .ToArray();
+        var knownQueryKeys = queryParameters
+            .Select(p => new ObjectQueryKey(p.Name!, false))
+            .Concat(queryParameters.SelectMany(GetObjectQueryKeys))
             .ToArray();
         foreach (var name in query.Keys)
         {
-            if (knownQueryParameters.Contains(name, StringComparer.Ordinal) ||
-                // deepObject style, e.g. filter[name]=value
-                knownQueryParameters.Any(p => name.StartsWith($"{p}[", StringComparison.Ordinal)))
+            if (knownQueryKeys.Any(k => k.IsMatch(name)))
             {
                 continue;
             }
@@ -448,10 +449,41 @@ public sealed class OpenApiValidationPlugin(
         _ => ParameterStyle.Simple
     };
 
+    private readonly record struct ObjectQueryKey(string Name, bool IsPrefix)
+    {
+        public bool IsMatch(string key) => IsPrefix
+            ? key.StartsWith(Name, StringComparison.Ordinal)
+            : string.Equals(key, Name, StringComparison.Ordinal);
+    }
+
+    // Query keys used to serialize object parameters: deepObject parameters
+    // are sent as filter[name]=value and exploded form objects as name=value
+    private static IEnumerable<ObjectQueryKey> GetObjectQueryKeys(IOpenApiParameter parameter)
+    {
+        if (parameter.Name is null)
+        {
+            return [];
+        }
+
+        if (parameter.Style == ParameterStyle.DeepObject)
+        {
+            return [new($"{parameter.Name}[", true)];
+        }
+
+        var type = OpenApiSchemaValidator.GetEffectiveType(parameter.Schema);
+        if ((parameter.Style ?? ParameterStyle.Form) == ParameterStyle.Form && parameter.Explode &&
+            type is not null && type.Value.HasFlag(JsonSchemaType.Object))
+        {
+            return OpenApiSchemaValidator.GetPropertyNames(parameter.Schema).Select(p => new ObjectQueryKey(p, false));
+        }
+
+        return [];
+    }
+
     private static void ValidateParameterValue(string name, string kind, List<string> values, IOpenApiSchema? schema,
         ParameterStyle style, bool explode, OpenApiValidationIssueLocation location, List<OpenApiValidationIssue> issues)
     {
-        if (schema is null || schema.Type == JsonSchemaType.Object)
+        if (schema is null || OpenApiSchemaValidator.GetEffectiveType(schema) == JsonSchemaType.Object)
         {
             return;
         }
@@ -601,7 +633,7 @@ public sealed class OpenApiValidationPlugin(
             return;
         }
 
-        if (mediaType.Schema is null || !IsJsonMediaType(contentType))
+        if (!IsJsonMediaType(contentType))
         {
             return;
         }
@@ -861,6 +893,9 @@ public sealed class OpenApiValidationPlugin(
         var authorityStart = url.IndexOf("://", StringComparison.Ordinal) + 3;
         var pathStart = url.IndexOf('/', authorityStart);
         var origin = pathStart < 0 ? url : url[..pathStart];
+        // request URLs omit default ports, e.g. https://api.contoso.com:443 -> https://api.contoso.com
+        origin = Regex.Replace(origin, "^(?:(?<o>https://[^/]*):443|(?<o>http://[^/]*):80)$", "${o}",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         var basePath = pathStart < 0 ? string.Empty : url[pathStart..];
 
         static string ToPattern(string value) =>

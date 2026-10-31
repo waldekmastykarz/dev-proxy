@@ -75,13 +75,14 @@ internal static class OpenApiSchemaValidator
         ParameterStyle style,
         bool explode)
     {
-        var type = schema?.Type;
+        var type = GetEffectiveType(schema);
         if (type is not null && type.Value.HasFlag(JsonSchemaType.Array))
         {
+            var itemsSchema = GetItems(schema);
             var array = new JsonArray();
             foreach (var item in SplitArrayValues(values, name, style, explode))
             {
-                array.Add(CoercePrimitive(item, schema!.Items));
+                array.Add(CoercePrimitive(item, itemsSchema));
             }
             return array;
         }
@@ -133,9 +134,66 @@ internal static class OpenApiSchemaValidator
         _ => value
     };
 
+    /// <summary>
+    /// Gets the type declared by the schema, or when the schema doesn't declare
+    /// a type, the types declared by its allOf/anyOf/oneOf subschemas.
+    /// </summary>
+    public static JsonSchemaType? GetEffectiveType(IOpenApiSchema? schema) => GetEffectiveType(schema, 0);
+
+    private static JsonSchemaType? GetEffectiveType(IOpenApiSchema? schema, int depth)
+    {
+        if (schema is null || depth > MaxDepth)
+        {
+            return null;
+        }
+        if (schema.Type is not null)
+        {
+            return schema.Type;
+        }
+
+        JsonSchemaType? type = null;
+        foreach (var subSchema in GetComposedSchemas(schema))
+        {
+            var subType = GetEffectiveType(subSchema, depth + 1);
+            if (subType is not null)
+            {
+                type = (type ?? 0) | subType.Value;
+            }
+        }
+        return type;
+    }
+
+    private static IOpenApiSchema? GetItems(IOpenApiSchema? schema, int depth = 0)
+    {
+        if (schema is null || depth > MaxDepth)
+        {
+            return null;
+        }
+        return schema.Items ?? GetComposedSchemas(schema)
+            .Select(s => GetItems(s, depth + 1))
+            .FirstOrDefault(i => i is not null);
+    }
+
+    /// <summary>
+    /// Gets the names of the properties declared by the schema and its allOf/anyOf/oneOf subschemas.
+    /// </summary>
+    public static IEnumerable<string> GetPropertyNames(IOpenApiSchema? schema, int depth = 0)
+    {
+        if (schema is null || depth > MaxDepth)
+        {
+            return [];
+        }
+        return (schema.Properties?.Keys ?? Enumerable.Empty<string>())
+            .Concat(GetComposedSchemas(schema).SelectMany(s => GetPropertyNames(s, depth + 1)))
+            .Distinct(StringComparer.Ordinal);
+    }
+
+    private static IEnumerable<IOpenApiSchema> GetComposedSchemas(IOpenApiSchema schema) =>
+        (schema.AllOf ?? []).Concat(schema.AnyOf ?? []).Concat(schema.OneOf ?? []);
+
     private static JsonValue? CoercePrimitive(string value, IOpenApiSchema? schema)
     {
-        var type = schema?.Type;
+        var type = GetEffectiveType(schema);
         if (type is null)
         {
             return JsonValue.Create(value);
@@ -355,7 +413,7 @@ internal static class OpenApiSchemaValidator
 
         foreach (var property in value.EnumerateObject())
         {
-            var propertyPath = $"{path}.{property.Name}";
+            var propertyPath = GetPropertyPath(path, property.Name);
             if (schema.Properties is not null &&
                 schema.Properties.TryGetValue(property.Name, out var propertySchema))
             {
@@ -371,6 +429,13 @@ internal static class OpenApiSchemaValidator
             }
         }
     }
+
+    // Use bracket notation for property names that would make the path
+    // ambiguous (e.g. 'a.b' vs. 'a' -> 'b'), because paths are also used as memo keys
+    private static string GetPropertyPath(string path, string propertyName) =>
+        propertyName.Length == 0 || propertyName.IndexOfAny(['.', '[', ']', '"']) >= 0
+            ? $"{path}[{JsonSerializer.Serialize(propertyName)}]"
+            : $"{path}.{propertyName}";
 
     private static string DescribeType(JsonSchemaType type)
     {
