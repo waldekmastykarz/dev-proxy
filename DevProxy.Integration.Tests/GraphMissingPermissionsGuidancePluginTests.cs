@@ -1,0 +1,241 @@
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
+
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using DevProxy.Abstractions.Proxy;
+using DevProxy.Plugins.Guidance;
+using Microsoft.Extensions.Logging;
+using Xunit;
+
+namespace DevProxy.Integration.Tests;
+
+/// <summary>
+/// Coverage for <see cref="GraphMissingPermissionsGuidancePlugin"/>. The Microsoft Graph
+/// DevX permissions API is stubbed with <see cref="StubPermissionsHandler"/> so the tests
+/// stay hermetic.
+/// </summary>
+public sealed class GraphMissingPermissionsGuidancePluginTests
+{
+    private const string MailPermissionsJson = """
+        [
+          { "value": "Mail.Read", "scopeType": "DelegatedWork", "isLeastPrivilege": false, "isHidden": false },
+          { "value": "Mail.ReadBasic", "scopeType": "DelegatedWork", "isLeastPrivilege": true, "isHidden": false },
+          { "value": "Mail.ReadWrite", "scopeType": "DelegatedWork", "isLeastPrivilege": false, "isHidden": false }
+        ]
+        """;
+
+    private const string UserPermissionsJson = """
+        [
+          { "value": "User.Read.All", "scopeType": "Application", "isLeastPrivilege": false, "isHidden": false },
+          { "value": "User.ReadBasic.All", "scopeType": "Application", "isLeastPrivilege": true, "isHidden": false }
+        ]
+        """;
+
+    private static ISet<UrlToWatch> GraphWatch => KestrelProxyHarness.BuildUrlsToWatch("graph.microsoft.com");
+
+    [Fact]
+    public async Task Forbidden_DelegatedTokenMissingPermission_LogsFailedWithLeastPrivilegedPermission()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/me/messages", [("Authorization", BearerToken(scp: "User.Read openid"))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Failed));
+        Assert.Contains("least privileged permission: Mail.ReadBasic", log.Message, StringComparison.Ordinal);
+        Assert.Contains("Mail.Read, Mail.ReadWrite", log.Message, StringComparison.Ordinal);
+        Assert.Contains("openid, User.Read", log.Message, StringComparison.Ordinal);
+        Assert.Contains("consent", log.Message, StringComparison.OrdinalIgnoreCase);
+
+        var requestUri = Assert.Single(handler.Requests);
+        Assert.Contains("scopeType=DelegatedWork", requestUri.Query, StringComparison.Ordinal);
+        Assert.Contains("requesturl=%2Fme%2Fmessages", requestUri.Query, StringComparison.Ordinal);
+        Assert.Contains("method=GET", requestUri.Query, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Forbidden_ApplicationTokenMissingPermission_LogsFailedWithAdminConsentInstructions()
+    {
+        using var handler = new StubPermissionsHandler(UserPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/users/8e6b0bba-5bce-4b1b-9d5b-1f5e8b0d1a6c", [("Authorization", BearerToken(roles: ["Mail.Read"]))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Failed));
+        Assert.Contains("User.ReadBasic.All", log.Message, StringComparison.Ordinal);
+        Assert.Contains("admin consent", log.Message, StringComparison.Ordinal);
+        Assert.Contains("scopeType=Application", Assert.Single(handler.Requests).Query, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Forbidden_TokenHasSufficientPermission_LogsWarningAboutOtherCauses()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/me/messages", [("Authorization", BearerToken(scp: "mail.read"))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        Assert.Empty(factory.LogsOfType(MessageType.Failed));
+        var log = Assert.Single(factory.LogsOfType(MessageType.Warning));
+        Assert.Contains("Mail.Read", log.Message, StringComparison.Ordinal);
+        Assert.Contains("another reason", log.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Forbidden_NoToken_LogsWarningWithoutCallingApi()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/me/messages")
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Warning));
+        Assert.Contains("access token", log.Message, StringComparison.Ordinal);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Forbidden_PermissionsUnknown_LogsWarning()
+    {
+        using var handler = new StubPermissionsHandler(null, HttpStatusCode.NotFound);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/foo/bar", [("Authorization", BearerToken(scp: "User.Read"))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Warning));
+        Assert.Contains("couldn't determine", log.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NonForbiddenResponse_IsIgnored()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/me/messages", [("Authorization", BearerToken(scp: "User.Read"))])
+            .WithResponse(HttpStatusCode.Unauthorized);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        Assert.Empty(factory.LogsOfType(MessageType.Failed));
+        Assert.Empty(factory.LogsOfType(MessageType.Warning));
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task RepeatedForbiddenRequests_UseCachedPermissions()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        foreach (var id in new[] { "0b8a5d2e-1c3f-4e5a-9b7c-6d8e9f0a1b2c", "4f3e2d1c-0b9a-4876-a543-210fedcba987" })
+        {
+            var exchange = TestExchange
+                .Request("GET", $"https://graph.microsoft.com/v1.0/me/messages/{id}", [("Authorization", BearerToken(scp: "User.Read"))])
+                .WithResponse(HttpStatusCode.Forbidden);
+            await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+        }
+
+        Assert.Equal(2, factory.LogsOfType(MessageType.Failed).Count);
+        _ = Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Batch_ForbiddenInnerResponse_LogsFailedForThatRequest()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var batchRequest = """
+            {
+              "requests": [
+                { "id": "1", "method": "GET", "url": "/me" },
+                { "id": "2", "method": "GET", "url": "/me/messages" }
+              ]
+            }
+            """;
+        var batchResponse = """
+            {
+              "responses": [
+                { "id": "1", "status": 200, "body": {} },
+                { "id": "2", "status": 403, "body": { "error": { "code": "ErrorAccessDenied", "message": "Access is denied." } } }
+              ]
+            }
+            """;
+
+        var exchange = TestExchange
+            .Request("POST", "https://graph.microsoft.com/v1.0/$batch", [("Authorization", BearerToken(scp: "User.Read")), ("Content-Type", "application/json")], batchRequest)
+            .WithResponse(HttpStatusCode.OK, [("Content-Type", "application/json")], batchResponse);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Failed));
+        Assert.Contains("Batch request 2", log.Message, StringComparison.Ordinal);
+        Assert.Contains("Mail.ReadBasic", log.Message, StringComparison.Ordinal);
+        Assert.Contains("requesturl=%2Fme%2Fmessages", Assert.Single(handler.Requests).Query, StringComparison.Ordinal);
+    }
+
+    private static (GraphMissingPermissionsGuidancePlugin Plugin, CapturingLoggerFactory Factory) CreatePlugin(HttpMessageHandler handler)
+    {
+        var factory = new CapturingLoggerFactory();
+#pragma warning disable CA2000 // HttpClient doesn't own the handler; the test disposes it
+        var httpClient = new HttpClient(handler, disposeHandler: false);
+#pragma warning restore CA2000
+        var plugin = new GraphMissingPermissionsGuidancePlugin(
+            httpClient,
+            new Logger<GraphMissingPermissionsGuidancePlugin>(factory),
+            GraphWatch);
+        return (plugin, factory);
+    }
+
+    private static string BearerToken(string? scp = null, string[]? roles = null)
+    {
+        var payload = new Dictionary<string, object> { ["aud"] = "https://graph.microsoft.com" };
+        if (scp is not null)
+        {
+            payload["scp"] = scp;
+        }
+        if (roles is not null)
+        {
+            payload["roles"] = roles;
+        }
+
+        static string Encode(string value) => Convert.ToBase64String(Encoding.UTF8.GetBytes(value))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+
+        return $"Bearer {Encode("""{"alg":"none","typ":"JWT"}""")}.{Encode(JsonSerializer.Serialize(payload))}.signature";
+    }
+
+    private sealed class StubPermissionsHandler(string? responseJson, HttpStatusCode statusCode = HttpStatusCode.OK) : HttpMessageHandler
+    {
+        public List<Uri> Requests { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requests.Add(request.RequestUri!);
+            return Task.FromResult(new HttpResponseMessage(statusCode)
+            {
+                Content = new StringContent(responseJson ?? "{}", Encoding.UTF8, "application/json")
+            });
+        }
+    }
+}

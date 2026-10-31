@@ -1,0 +1,292 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
+
+using DevProxy.Abstractions.Models;
+using DevProxy.Abstractions.Plugins;
+using DevProxy.Abstractions.Proxy;
+using DevProxy.Abstractions.Utils;
+using DevProxy.Plugins.Models;
+using DevProxy.Plugins.Utils;
+using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
+
+namespace DevProxy.Plugins.Guidance;
+
+public sealed class GraphMissingPermissionsGuidancePlugin(
+    HttpClient httpClient,
+    ILogger<GraphMissingPermissionsGuidancePlugin> logger,
+    ISet<UrlToWatch> urlsToWatch) : BasePlugin(logger, urlsToWatch)
+{
+    private static readonly TimeSpan PermissionsLookupTimeout = TimeSpan.FromSeconds(10);
+
+#pragma warning disable CA2213 // Disposable fields should be disposed - HttpClient is injected via DI
+    private readonly HttpClient _httpClient = httpClient;
+#pragma warning restore CA2213
+    private readonly ConcurrentDictionary<string, GraphPermissionInfo[]> _permissionsCache = new(StringComparer.OrdinalIgnoreCase);
+
+    public override string Name => nameof(GraphMissingPermissionsGuidancePlugin);
+
+    public override async Task AfterResponseAsync(ProxyResponseArgs e, CancellationToken cancellationToken)
+    {
+        Logger.LogTrace("{Method} called", nameof(AfterResponseAsync));
+
+        ArgumentNullException.ThrowIfNull(e);
+
+        var loggingContext = new LoggingContext(e.ProxySession);
+        var request = e.ProxySession.Request;
+        var response = e.ProxySession.Response;
+
+        if (!e.HasRequestUrlMatch(UrlsToWatch))
+        {
+            Logger.LogRequest("URL not matched", MessageType.Skipped, loggingContext);
+            return;
+        }
+        if (string.Equals(request.Method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
+        {
+            Logger.LogRequest("Skipping OPTIONS request", MessageType.Skipped, loggingContext);
+            return;
+        }
+        if (!ProxyUtils.IsGraphRequest(request))
+        {
+            Logger.LogRequest("Not a Microsoft Graph request", MessageType.Skipped, loggingContext);
+            return;
+        }
+        if (response is null)
+        {
+            Logger.LogRequest("No response", MessageType.Skipped, loggingContext);
+            return;
+        }
+
+        var (permissionsType, tokenPermissions) = GraphUtils.GetPermissionsFromAuthorizationHeader(
+            request.Headers.GetFirst("Authorization")?.Value);
+
+        if (ProxyUtils.IsGraphBatchUrl(request.RequestUri))
+        {
+            if (response.StatusCode != HttpStatusCode.OK)
+            {
+                Logger.LogRequest("Skipping non-successful batch response", MessageType.Skipped, loggingContext);
+                return;
+            }
+
+            var failedRequests = GetForbiddenRequestsFromBatch(request.BodyString, response.BodyString);
+            if (failedRequests.Count == 0)
+            {
+                Logger.LogRequest("No forbidden requests in batch", MessageType.Skipped, loggingContext);
+                return;
+            }
+
+            var graphVersion = ProxyUtils.IsGraphBetaUrl(request.RequestUri) ? "beta" : "v1.0";
+            foreach (var failedRequest in failedRequests)
+            {
+                var relativeUrl = failedRequest.Url.StartsWith('/') ? failedRequest.Url : $"/{failedRequest.Url}";
+                var absoluteUrl = $"https://{request.RequestUri.Host}/{graphVersion}{relativeUrl}";
+                await AnalyzeForbiddenRequestAsync(
+                    failedRequest.Method,
+                    absoluteUrl,
+                    $"Batch request {failedRequest.Id} ({failedRequest.Method} {failedRequest.Url})",
+                    permissionsType,
+                    tokenPermissions,
+                    loggingContext,
+                    cancellationToken);
+            }
+        }
+        else if (response.StatusCode == HttpStatusCode.Forbidden)
+        {
+            await AnalyzeForbiddenRequestAsync(
+                request.Method,
+                request.RequestUri.AbsoluteUri,
+                "Request",
+                permissionsType,
+                tokenPermissions,
+                loggingContext,
+                cancellationToken);
+        }
+        else
+        {
+            Logger.LogRequest("Skipping non-403 response", MessageType.Skipped, loggingContext);
+        }
+
+        Logger.LogTrace("Left {Name}", nameof(AfterResponseAsync));
+    }
+
+    private async Task AnalyzeForbiddenRequestAsync(
+        string method,
+        string absoluteUrl,
+        string requestDescription,
+        GraphPermissionsType? permissionsType,
+        IEnumerable<string> tokenPermissions,
+        LoggingContext loggingContext,
+        CancellationToken cancellationToken)
+    {
+        if (permissionsType is null)
+        {
+            Logger.LogRequest(
+                $"{requestDescription} failed with 403 Forbidden. Dev Proxy couldn't read permissions from the access token on the request so it can't tell if the request failed due to missing permissions. Make sure the request includes a valid bearer token (JWT) issued for Microsoft Graph.",
+                MessageType.Warning,
+                loggingContext);
+            return;
+        }
+
+        string tokenizedUrl;
+        try
+        {
+            tokenizedUrl = GraphUtils.GetTokenizedUrl(absoluteUrl);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Failed to tokenize URL {Url}", absoluteUrl);
+            return;
+        }
+
+        var requiredPermissions = await GetPermissionsAsync(method, tokenizedUrl, permissionsType.Value, cancellationToken);
+        if (requiredPermissions is null || requiredPermissions.Length == 0)
+        {
+            Logger.LogRequest(
+                $"{requestDescription} failed with 403 Forbidden. Dev Proxy couldn't determine which permissions are required for {method} {tokenizedUrl}. Check the Microsoft Graph API reference for the permissions required to call this API.",
+                MessageType.Warning,
+                loggingContext);
+            return;
+        }
+
+        var tokenPermissionsSet = new HashSet<string>(tokenPermissions, StringComparer.OrdinalIgnoreCase);
+        var grantingPermissions = requiredPermissions
+            .Select(p => p.Value)
+            .Where(tokenPermissionsSet.Contains)
+            .ToArray();
+
+        if (grantingPermissions.Length > 0)
+        {
+            Logger.LogRequest(
+                $"{requestDescription} failed with 403 Forbidden even though the access token has the {FormatList(grantingPermissions)} {GetPermissionsTypeString(permissionsType.Value)} permission(s) which allow calling {method} {tokenizedUrl}. The request likely failed for another reason, for example: the {(permissionsType == GraphPermissionsType.Delegated ? "signed-in user" : "app")} doesn't have access to the resource, a required license or administrative role is missing, or the resource is restricted by a policy. Check the error details in the response for more information.",
+                MessageType.Warning,
+                loggingContext);
+            return;
+        }
+
+        var leastPrivileged = requiredPermissions
+            .Where(p => p.IsLeastPrivilege)
+            .Select(p => p.Value)
+            .ToArray();
+        if (leastPrivileged.Length == 0)
+        {
+            leastPrivileged = [requiredPermissions[0].Value];
+        }
+        var otherPermissions = requiredPermissions
+            .Select(p => p.Value)
+            .Except(leastPrivileged, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var tokenPermissionsString = tokenPermissionsSet.Count > 0
+            ? FormatList(tokenPermissionsSet.Order(StringComparer.OrdinalIgnoreCase))
+            : "none";
+
+        var message = $"{requestDescription} failed with 403 Forbidden because the access token doesn't have the permissions required to call {method} {tokenizedUrl}. " +
+            $"{CapitalizeFirst(GetPermissionsTypeString(permissionsType.Value))} permissions on the token: {tokenPermissionsString}. " +
+            $"Add the least privileged permission: {FormatList(leastPrivileged)}." +
+            (otherPermissions.Length > 0 ? $" Alternatively, use one of the following higher-privileged permissions: {FormatList(otherPermissions)}." : string.Empty) +
+            " " + GetInstructions(permissionsType.Value);
+
+        Logger.LogRequest(message, MessageType.Failed, loggingContext);
+    }
+
+    private async Task<GraphPermissionInfo[]?> GetPermissionsAsync(
+        string method,
+        string tokenizedUrl,
+        GraphPermissionsType permissionsType,
+        CancellationToken cancellationToken)
+    {
+        var scopeType = GraphUtils.GetScopeTypeString(permissionsType);
+        var cacheKey = $"{scopeType}|{method}|{tokenizedUrl}";
+        if (_permissionsCache.TryGetValue(cacheKey, out var cachedPermissions))
+        {
+            Logger.LogDebug("Using cached permissions for {CacheKey}", cacheKey);
+            return cachedPermissions;
+        }
+
+        var url = $"https://graph-devx-api.microsoft.com/permissions?scopeType={scopeType}&requesturl={Uri.EscapeDataString(tokenizedUrl)}&method={Uri.EscapeDataString(method.ToUpperInvariant())}";
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(PermissionsLookupTimeout);
+
+            Logger.LogDebug("Retrieving permissions from {Url}", url);
+            using var response = await _httpClient.GetAsync(new Uri(url), cts.Token);
+            if (response.StatusCode == HttpStatusCode.NotFound)
+            {
+                Logger.LogDebug("No permissions found for {Method} {Url}", method, tokenizedUrl);
+                _permissionsCache[cacheKey] = [];
+                return [];
+            }
+            if (!response.IsSuccessStatusCode)
+            {
+                Logger.LogDebug("Failed to retrieve permissions for {Method} {Url}: {StatusCode}", method, tokenizedUrl, response.StatusCode);
+                return null;
+            }
+
+            var permissions = (await response.Content.ReadFromJsonAsync<GraphPermissionInfo[]>(ProxyUtils.JsonSerializerOptions, cts.Token) ?? [])
+                .Where(p => !p.IsHidden && !string.IsNullOrEmpty(p.Value))
+                .ToArray();
+            _permissionsCache[cacheKey] = permissions;
+            return permissions;
+        }
+        catch (Exception ex) when ((ex is HttpRequestException or JsonException or OperationCanceledException) && !cancellationToken.IsCancellationRequested)
+        {
+            Logger.LogDebug(ex, "Failed to retrieve permissions for {Method} {Url}", method, tokenizedUrl);
+            return null;
+        }
+    }
+
+    private List<GraphBatchRequestPayloadRequest> GetForbiddenRequestsFromBatch(string requestBody, string responseBody)
+    {
+        if (string.IsNullOrEmpty(requestBody) || string.IsNullOrEmpty(responseBody))
+        {
+            return [];
+        }
+
+        try
+        {
+            var batchRequest = JsonSerializer.Deserialize<GraphBatchRequestPayload>(requestBody, ProxyUtils.JsonSerializerOptions);
+            var batchResponse = JsonSerializer.Deserialize<GraphBatchResponsePayload>(responseBody, ProxyUtils.JsonSerializerOptions);
+            if (batchRequest is null || batchResponse is null)
+            {
+                return [];
+            }
+
+            var forbiddenIds = batchResponse.Responses
+                .Where(r => r.Status == (int)HttpStatusCode.Forbidden)
+                .Select(r => r.Id)
+                .ToHashSet(StringComparer.Ordinal);
+
+            return [.. batchRequest.Requests.Where(r => forbiddenIds.Contains(r.Id) && !string.IsNullOrEmpty(r.Url))];
+        }
+        catch (JsonException ex)
+        {
+            Logger.LogDebug(ex, "Failed to parse batch request or response");
+            return [];
+        }
+    }
+
+    private static string GetInstructions(GraphPermissionsType permissionsType) => permissionsType switch
+    {
+        GraphPermissionsType.Delegated => "To fix it, add the permission to the delegated permissions of your app registration in Microsoft Entra ID, include it in the scopes your app requests when acquiring the access token, and make sure the user (or an administrator, for permissions that require admin consent) consents to it.",
+        GraphPermissionsType.Application => "To fix it, add the permission to the application permissions of your app registration in Microsoft Entra ID, grant admin consent for it, and acquire a new access token.",
+        _ => string.Empty
+    };
+
+    private static string GetPermissionsTypeString(GraphPermissionsType permissionsType) => permissionsType switch
+    {
+        GraphPermissionsType.Delegated => "delegated",
+        GraphPermissionsType.Application => "application",
+        _ => permissionsType.ToString()
+    };
+
+    private static string CapitalizeFirst(string value) =>
+        string.IsNullOrEmpty(value) ? value : char.ToUpperInvariant(value[0]) + value[1..];
+
+    private static string FormatList(IEnumerable<string> values) => string.Join(", ", values);
+}
