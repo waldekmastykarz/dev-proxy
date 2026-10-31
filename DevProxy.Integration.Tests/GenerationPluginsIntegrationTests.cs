@@ -536,6 +536,30 @@ public sealed class GenerationPluginsIntegrationTests
         Assert.Equal(["id", "label"], PropertyNames(items.GetProperty("properties").GetProperty("tags").GetProperty("items")));
     }
 
+    [Theory]
+    [InlineData("[]", """[ { "id": 1, "name": "alpha" } ]""", "items")]
+    [InlineData("{}", """{ "id": 1, "name": "alpha" }""", null)]
+    public async Task OpenApiSpecGenerator_MergesIntoEmptySchemaRecordedFirst(string firstBody, string secondBody, string? itemsProperty)
+    {
+        static RequestLog Exchange(string responseBody) =>
+            TestExchange
+                .Request("GET", "https://api.contoso.com/users")
+                .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: responseBody)
+                .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(Exchange(firstBody), Exchange(secondBody));
+
+        var schema = spec.RootElement.GetProperty("paths").GetProperty("/users").GetProperty("get")
+            .GetProperty("responses").GetProperty("200").GetProperty("content").GetProperty("application/json")
+            .GetProperty("schema");
+        if (itemsProperty is not null)
+        {
+            schema = schema.GetProperty(itemsProperty);
+        }
+
+        Assert.Equal(["id", "name"], schema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray());
+    }
+
     [Fact]
     public async Task OpenApiSpecGenerator_SkipsResponseBodyWithoutContentType()
     {

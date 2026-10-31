@@ -608,19 +608,25 @@ public sealed class OpenApiSpecGeneratorPlugin(
             return;
         }
 
-        if (target.Properties is null || !target.Properties.Any())
+        var targetProperties = target.Properties;
+        if (targetProperties is null)
         {
-            Logger.LogDebug("        Target has no properties. Skipping...");
-            return;
+            if (target is not OpenApiSchema targetSchema)
+            {
+                Logger.LogDebug("        Target has no properties. Skipping...");
+                return;
+            }
+
+            targetSchema.Properties = targetProperties = new Dictionary<string, IOpenApiSchema>();
         }
 
         foreach (var property in source.Properties)
         {
-            var propertyFromTarget = target.Properties.FirstOrDefault(p => p.Key == property.Key);
+            var propertyFromTarget = targetProperties.FirstOrDefault(p => p.Key == property.Key);
             if (propertyFromTarget.Value is null)
             {
                 Logger.LogDebug("        Adding property {PropertyKey} to schema...", property.Key);
-                target.Properties.Add(property);
+                targetProperties.Add(property);
                 continue;
             }
 
