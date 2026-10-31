@@ -329,9 +329,12 @@ sealed class DevProxyCommand : RootCommand
 
             // The proxy binds in a background service, so wait for it before
             // publishing readiness. Otherwise a detached launcher could report a
-            // successful start for a proxy that failed to bind.
+            // successful start for a proxy that failed to bind. Don't pass the
+            // cancellation token: a bind failure stops the host, which would cancel
+            // the wait before the failure is reported. The engine always completes
+            // Started once the host stops.
             var proxyEngines = _app.Services.GetServices<IHostedService>().OfType<KestrelProxyEngine>().ToArray();
-            var proxyStarted = (await Task.WhenAll(proxyEngines.Select(e => e.Started)).WaitAsync(cancellationToken)).All(started => started);
+            var proxyStarted = (await Task.WhenAll(proxyEngines.Select(e => e.Started))).All(started => started);
             if (!proxyStarted)
             {
                 await _app.WaitForShutdownAsync(cancellationToken);
