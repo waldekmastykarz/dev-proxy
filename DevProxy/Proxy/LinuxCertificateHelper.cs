@@ -342,8 +342,8 @@ internal static class LinuxCertificateHelper
             }
         }
 
-        RemoveFromNssDatabase(logger);
-        return removed;
+        // Run NSS removal even if the system store step failed, so it's as complete as possible.
+        return RemoveFromNssDatabase(logger) && removed;
     }
 
     /// <summary>Returns false when certutil is available but couldn't add the certificate.</summary>
@@ -362,7 +362,15 @@ internal static class LinuxCertificateHelper
         string error;
         if (!Directory.Exists(nssDir))
         {
-            _ = Directory.CreateDirectory(nssDir);
+            try
+            {
+                _ = Directory.CreateDirectory(nssDir);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                LogNssTrustFailure(logger, nssDir, ex.Message, leftoverEntry: false);
+                return false;
+            }
             error = Execute(new(certutil, ["-N", "-d", db, "--empty-password"]), redirectOutput: true).Error;
             if (error.Length > 0)
             {
@@ -404,13 +412,14 @@ internal static class LinuxCertificateHelper
         }
     }
 
-    private static void RemoveFromNssDatabase(ILogger logger)
+    /// <summary>Returns false when certutil found the certificate but couldn't delete it.</summary>
+    private static bool RemoveFromNssDatabase(ILogger logger)
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var nssDirs = GetNssDatabaseDirectoriesForRemoval(home, Directory.Exists).ToArray();
         if (nssDirs.Length == 0)
         {
-            return;
+            return true;
         }
 
         var certutil = FindCertutil();
@@ -419,9 +428,10 @@ internal static class LinuxCertificateHelper
             logger.LogWarning(
                 "Couldn't find certutil to check the NSS database ({Paths}). If you added the Dev Proxy root certificate there, remove '{Nickname}' manually or install certutil and run 'devproxy cert remove' again.",
                 string.Join(", ", nssDirs), NssNickname);
-            return;
+            return true;
         }
 
+        var removed = true;
         foreach (var nssDir in nssDirs)
         {
             var db = $"sql:{nssDir}";
@@ -436,9 +446,11 @@ internal static class LinuxCertificateHelper
             }
             else
             {
+                removed = false;
                 logger.LogError("Couldn't remove the Dev Proxy root certificate from the NSS database ({Path}). Remove '{Nickname}' manually.", nssDir, NssNickname);
             }
         }
+        return removed;
     }
 
     /// <summary>
@@ -447,6 +459,18 @@ internal static class LinuxCertificateHelper
     /// </summary>
     internal static IEnumerable<string> GetNssDatabaseDirectoriesForRemoval(string home, Func<string, bool> dirExists) =>
         new[] { $"{home}/.pki/nssdb", $"{home}/.local/share/pki/nssdb" }.Where(dirExists);
+
+    /// <summary>
+    /// Replaces rather than follows an existing entry: deleting a symlink doesn't touch its target,
+    /// and CreateNew fails if something is recreated at the path in between.
+    /// </summary>
+    internal static void WriteNewFile(string path, string contents)
+    {
+        File.Delete(path);
+        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write);
+        using var writer = new StreamWriter(stream);
+        writer.Write(contents);
+    }
 
     /// <summary>
     /// Writes the public root certificate to devproxy-ca.crt in the current directory so the user
@@ -458,7 +482,7 @@ internal static class LinuxCertificateHelper
         var path = Path.GetFullPath(CertificateFileName);
         try
         {
-            File.WriteAllText(path, certificate.ExportCertificatePem() + "\n");
+            WriteNewFile(path, certificate.ExportCertificatePem() + "\n");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

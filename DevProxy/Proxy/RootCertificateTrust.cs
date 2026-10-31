@@ -136,7 +136,7 @@ internal sealed class RootCertificateTrust(
         {
             if (!LinuxCertificateHelper.RemoveTrustedCertificate(rootCertificate, logger))
             {
-                throw new InvalidOperationException("Failed to remove the root certificate from the system certificate store.");
+                throw new InvalidOperationException("Failed to fully remove the root certificate from the system certificate store and NSS databases.");
             }
         }
         else

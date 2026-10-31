@@ -267,6 +267,52 @@ public class LinuxCertificateHelperTests
     }
 
     [Fact]
+    public void WriteNewFile_ReplacesSymlinkWithoutTouchingTarget()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var dir = Directory.CreateTempSubdirectory();
+        try
+        {
+            var target = Path.Combine(dir.FullName, "target");
+            var path = Path.Combine(dir.FullName, "devproxy-ca.crt");
+            File.WriteAllText(target, "original");
+            _ = File.CreateSymbolicLink(path, target);
+
+            LinuxCertificateHelper.WriteNewFile(path, "cert");
+
+            Assert.Equal("original", File.ReadAllText(target));
+            Assert.Null(new FileInfo(path).LinkTarget);
+            Assert.Equal("cert", File.ReadAllText(path));
+        }
+        finally
+        {
+            dir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void WriteNewFile_OverwritesExistingFile()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(path, "old");
+
+            LinuxCertificateHelper.WriteNewFile(path, "new");
+
+            Assert.Equal("new", File.ReadAllText(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void GetNssDatabaseDirectoriesForRemoval_ReturnsEveryExistingDatabase()
     {
         Assert.Equal(["/home/u/.pki/nssdb", "/home/u/.local/share/pki/nssdb"],
