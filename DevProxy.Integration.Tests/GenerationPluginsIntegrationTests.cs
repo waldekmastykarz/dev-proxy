@@ -459,6 +459,40 @@ public sealed class GenerationPluginsIntegrationTests
     }
 
     [Fact]
+    public async Task OpenApiSpecGenerator_GeneratesUniquePathParameterNames()
+    {
+        var exchange = TestExchange
+            .Request("GET", "https://api.contoso.com/tiles/12/3456/7890")
+            .WithResponse(HttpStatusCode.NoContent)
+            .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(exchange);
+
+        var pathItem = spec.RootElement.GetProperty("paths").GetProperty("/tiles/{tiles-id}/{tiles-id-2}/{tiles-id-3}");
+        Assert.Equal(["tiles-id", "tiles-id-2", "tiles-id-3"], ParameterNames(pathItem, "path"));
+    }
+
+    [Fact]
+    public async Task OpenApiSpecGenerator_MergesHeadersAcrossRequests()
+    {
+        static RequestLog Exchange(string requestHeader, (string Name, string Value)[] responseHeaders) =>
+            TestExchange
+                .Request("GET", "https://api.contoso.com/users", headers: [(requestHeader, "a")])
+                .WithResponse(HttpStatusCode.NoContent, headers: responseHeaders)
+                .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(
+            Exchange("X-Custom-Request", []),
+            Exchange("x-custom-request", [("X-Custom-Response", "a")]),
+            Exchange("X-Custom-Request", [("x-custom-response", "b")]));
+
+        var operation = spec.RootElement.GetProperty("paths").GetProperty("/users").GetProperty("get");
+        Assert.Equal(["X-Custom-Request"], ParameterNames(operation, "header"));
+        var responseHeaders = operation.GetProperty("responses").GetProperty("204").GetProperty("headers").EnumerateObject().Select(h => h.Name).ToArray();
+        Assert.Equal(["X-Custom-Response"], responseHeaders);
+    }
+
+    [Fact]
     public async Task OpenApiSpecGenerator_MergesBodySchemasAcrossRequests()
     {
         static RequestLog Exchange(string requestBody, string responseBody) =>

@@ -567,7 +567,8 @@ public sealed class OpenApiSpecGeneratorPlugin(
 
         foreach (var parameter in parameters)
         {
-            var paramFromOperation = operation.Parameters?.FirstOrDefault(p => p.Name == parameter.Name && p.In == parameter.In);
+            var nameComparison = parameter.In == ParameterLocation.Header ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            var paramFromOperation = operation.Parameters?.FirstOrDefault(p => p.In == parameter.In && string.Equals(p.Name, parameter.Name, nameComparison));
             if (paramFromOperation is null)
             {
                 Logger.LogDebug("      Adding parameter {ParameterName} to operation...", parameter.Name);
@@ -685,6 +686,8 @@ public sealed class OpenApiSpecGeneratorPlugin(
             return;
         }
 
+        MergeResponseHeaders(responseFromOperation, apiResponse);
+
         if (apiResponse.Content is null || !apiResponse.Content.Any())
         {
             Logger.LogDebug("    No response content to process");
@@ -711,6 +714,27 @@ public sealed class OpenApiSpecGeneratorPlugin(
         MergeSchema(apiResponse.Content.First().Value.Schema, contentFromOperation.Schema);
     }
 
+    private void MergeResponseHeaders(IOpenApiResponse responseFromOperation, IOpenApiResponse apiResponse)
+    {
+        if (apiResponse.Headers is null || apiResponse.Headers.Count == 0 ||
+            responseFromOperation is not OpenApiResponse retainedResponse)
+        {
+            return;
+        }
+
+        retainedResponse.Headers ??= new Dictionary<string, IOpenApiHeader>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, header) in apiResponse.Headers)
+        {
+            if (retainedResponse.Headers.ContainsKey(name))
+            {
+                continue;
+            }
+
+            Logger.LogDebug("    Adding response header {HeaderName}...", name);
+            retainedResponse.Headers.Add(name, header);
+        }
+    }
+
     /**
      * Replaces segments in the request URI, that match predefined patters,
      * with parameters and adds them to the OpenAPI PathItem.
@@ -722,6 +746,7 @@ public sealed class OpenApiSpecGeneratorPlugin(
     {
         var segments = requestUri.Segments;
         var previousSegment = "item";
+        var parameterNameCounts = new Dictionary<string, int>(StringComparer.Ordinal);
 
         for (var i = 0; i < segments.Length; i++)
         {
@@ -734,6 +759,11 @@ public sealed class OpenApiSpecGeneratorPlugin(
             if (IsParametrizable(segment))
             {
                 var parameterName = $"{previousSegment}-id";
+                var count = parameterNameCounts[parameterName] = parameterNameCounts.GetValueOrDefault(parameterName) + 1;
+                if (count > 1)
+                {
+                    parameterName = $"{parameterName}-{count}";
+                }
                 segments[i] = $"{{{parameterName}}}{(requestUri.Segments[i].EndsWith('/') ? "/" : "")}";
 
                 pathItem.Parameters?.Add(new OpenApiParameter
