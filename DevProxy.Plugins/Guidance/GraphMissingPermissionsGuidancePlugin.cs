@@ -158,7 +158,8 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
         catch (Exception ex)
         {
             Logger.LogDebug(ex, "Failed to tokenize URL {Url}", absoluteUrl);
-            return (null, MessageType.Skipped);
+            return ($"{requestDescription} failed with 403 Forbidden, but Dev Proxy couldn't analyze missing permissions for {method} {absoluteUrl} because it couldn't parse the URL. Check the Microsoft Graph API reference for the permissions required to call this API.",
+                MessageType.Tip);
         }
 
         var requiredPermissions = await GetPermissionsAsync(method, tokenizedUrl, permissionsType.Value, cancellationToken);

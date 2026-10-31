@@ -315,6 +315,48 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
         Assert.Contains("another reason", log.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("https://graph.microsoft.com/v1.0/users('8e6b0bba-5bce-4b1b-9d5b-1f5e8b0d1a6c')")]
+    [InlineData("https://graph.microsoft.com/v1.0/users('john@contoso.com')/messages")]
+    public async Task Forbidden_UnparsableUrl_LogsTip(string url)
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", url, [("Authorization", BearerToken(scp: "User.Read"))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Tip));
+        Assert.Contains("couldn't analyze missing permissions", log.Message, StringComparison.Ordinal);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Batch_ForbiddenInnerResponseWithUnparsableUrl_LogsTip()
+    {
+        using var handler = new StubPermissionsHandler(MailPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var batchRequest = """
+            { "requests": [ { "id": "1", "method": "GET", "url": "/users('john@contoso.com')/messages" } ] }
+            """;
+        var batchResponse = """
+            { "responses": [ { "id": "1", "status": 403, "body": {} } ] }
+            """;
+
+        var exchange = TestExchange
+            .Request("POST", "https://graph.microsoft.com/v1.0/$batch", [("Authorization", BearerToken(scp: "User.Read")), ("Content-Type", "application/json")], batchRequest)
+            .WithResponse(HttpStatusCode.OK, [("Content-Type", "application/json")], batchResponse);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Tip));
+        Assert.Contains("Batch request 1", log.Message, StringComparison.Ordinal);
+        Assert.Contains("couldn't analyze missing permissions", log.Message, StringComparison.Ordinal);
+        Assert.Empty(handler.Requests);
+    }
+
     [Fact]
     public async Task Forbidden_NoLeastPrivilegedPermissionMarked_ListsUnrankedAlternatives()
     {
