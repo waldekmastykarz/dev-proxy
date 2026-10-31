@@ -327,6 +327,22 @@ sealed class DevProxyCommand : RootCommand
             await ApiSecurity.SaveTokenAsync(cancellationToken);
             await _app.StartAsync(cancellationToken);
 
+            // The proxy binds in a background service, so wait for it before
+            // publishing readiness. Otherwise a detached launcher could report a
+            // successful start for a proxy that failed to bind.
+            var proxyEngines = _app.Services.GetServices<IHostedService>().OfType<KestrelProxyEngine>().ToArray();
+            var proxyStarted = (await Task.WhenAll(proxyEngines.Select(e => e.Started)).WaitAsync(cancellationToken)).All(started => started);
+            if (!proxyStarted)
+            {
+                await _app.WaitForShutdownAsync(cancellationToken);
+                if (proxyEngines.Any(e => e.PortInUse))
+                {
+                    _logger.LogError("{PortConflict}",
+                        await PortConflict.GetMessageAsync(PortKind.Proxy, _proxyConfiguration.IPAddress, _proxyConfiguration.Port, CancellationToken.None));
+                }
+                return 1;
+            }
+
             var serverAddresses = _app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>();
             var serverAddress = serverAddresses?.Addresses.FirstOrDefault();
             var address = ApiSecurity.GetApiUrl(serverAddress ??
@@ -349,13 +365,6 @@ sealed class DevProxyCommand : RootCommand
 
             await _app.WaitForShutdownAsync(cancellationToken);
 
-            if (_app.Services.GetServices<IHostedService>().OfType<KestrelProxyEngine>().Any(e => e.PortInUse))
-            {
-                _logger.LogError("{PortConflict}",
-                    await PortConflict.GetMessageAsync(PortKind.Proxy, _proxyConfiguration.Port, CancellationToken.None));
-                return 1;
-            }
-
             return 0;
         }
         catch (TaskCanceledException)
@@ -366,7 +375,7 @@ sealed class DevProxyCommand : RootCommand
         {
             // The API port was taken between the pre-flight check and binding.
             _logger.LogError("{PortConflict}",
-                await PortConflict.GetMessageAsync(PortKind.Api, _proxyConfiguration.ApiPort, CancellationToken.None));
+                await PortConflict.GetMessageAsync(PortKind.Api, _proxyConfiguration.ApiIpAddress, _proxyConfiguration.ApiPort, CancellationToken.None));
             return 1;
         }
         catch (Exception ex)

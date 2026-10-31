@@ -101,8 +101,8 @@ static async Task<int> StartDetachedProcessAsync(string[] args)
         var requestedPort = earlyOptions.Port ?? 8000;
         var requestedApiPort = earlyOptions.ApiPort ?? 8897;
 
-        var proxyPortOwner = PortConflict.FindOwningInstance(existingStates, PortKind.Proxy, requestedPort, Environment.ProcessId);
-        var apiPortOwner = PortConflict.FindOwningInstance(existingStates, PortKind.Api, requestedApiPort, Environment.ProcessId);
+        var proxyPortOwner = PortConflict.FindOwningInstance(existingStates, earlyOptions.IPAddress, requestedPort, Environment.ProcessId);
+        var apiPortOwner = PortConflict.FindOwningInstance(existingStates, earlyOptions.ApiIpAddress, requestedApiPort, Environment.ProcessId);
         var conflictMessage = proxyPortOwner is not null
             ? PortConflict.FormatMessage(PortKind.Proxy, requestedPort, proxyPortOwner)
             : apiPortOwner is not null
@@ -236,10 +236,12 @@ static async Task<int> StartDetachedProcessAsync(string[] args)
 
                 if (isJsonOutput)
                 {
-                    // The daemon's log already consists of JSONL entries; pass them through as-is.
                     if (!string.IsNullOrEmpty(logOutput))
                     {
-                        await Console.Error.WriteLineAsync(logOutput.TrimEnd());
+                        foreach (var entry in ToJsonLogEntries(logOutput))
+                        {
+                            await Console.Error.WriteLineAsync(entry);
+                        }
                     }
                     var message = "Dev Proxy failed to start.";
                     if (!string.IsNullOrEmpty(errorOutput))
@@ -342,6 +344,52 @@ static string FormatJsonLogEntry(string level, string message)
         timestamp = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture)
     };
     return JsonSerializer.Serialize(entry, jsonlOptions);
+}
+
+// The daemon logs JSONL, but output it doesn't control (like unhandled
+// exception stack traces) can end up in its log too. Keep JSON entries as-is
+// and wrap other runs of lines so the output stays valid JSONL.
+static IEnumerable<string> ToJsonLogEntries(string log)
+{
+    var pending = new List<string>();
+    foreach (var line in log.TrimEnd().Split('\n'))
+    {
+        var trimmed = line.TrimEnd('\r');
+        if (IsJsonObject(trimmed))
+        {
+            if (pending.Count > 0)
+            {
+                yield return FormatJsonLogEntry("error", string.Join(Environment.NewLine, pending));
+                pending.Clear();
+            }
+            yield return trimmed;
+        }
+        else if (pending.Count > 0 || !string.IsNullOrWhiteSpace(trimmed))
+        {
+            pending.Add(trimmed);
+        }
+    }
+    if (pending.Count > 0)
+    {
+        yield return FormatJsonLogEntry("error", string.Join(Environment.NewLine, pending).TrimEnd());
+    }
+}
+
+static bool IsJsonObject(string line)
+{
+    if (!line.StartsWith('{'))
+    {
+        return false;
+    }
+    try
+    {
+        using var document = JsonDocument.Parse(line);
+        return document.RootElement.ValueKind == JsonValueKind.Object;
+    }
+    catch (JsonException)
+    {
+        return false;
+    }
 }
 
 static async Task<string?> ReadDaemonLogAsync(int pid)

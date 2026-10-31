@@ -40,6 +40,14 @@ public sealed class KestrelProxyEngine(
     /// </summary>
     public bool PortInUse { get; private set; }
 
+    private readonly TaskCompletionSource<bool> _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>
+    /// Completes with true once the proxy is listening, or with false if it
+    /// stopped before it could start listening (for example, port in use).
+    /// </summary>
+    public Task<bool> Started => _started.Task;
+
     private static bool IsAddressInUse(Exception? ex)
     {
         for (var current = ex; current is not null; current = current.InnerException)
@@ -53,6 +61,18 @@ public sealed class KestrelProxyEngine(
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await RunAsync(stoppingToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _ = _started.TrySetResult(false);
+        }
+    }
+
+    private async Task RunAsync(CancellationToken stoppingToken)
     {
         var ipAddress = string.IsNullOrWhiteSpace(configuration.IPAddress)
             ? IPAddress.Loopback
@@ -147,6 +167,8 @@ public sealed class KestrelProxyEngine(
             systemProxyManager.Enable(configuration.IPAddress, boundPort);
             systemProxyEnabled = true;
         }
+
+        _ = _started.TrySetResult(true);
 
         try
         {

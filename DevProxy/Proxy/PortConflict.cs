@@ -1,4 +1,4 @@
-// Licensed to the .NET Foundation under one or more agreements.
+﻿// Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
@@ -33,8 +33,7 @@ internal static class PortConflict
             return true;
         }
 
-        var address = string.IsNullOrWhiteSpace(ipAddress) ? IPAddress.Loopback : null;
-        if (address is null && !IPAddress.TryParse(ipAddress, out address))
+        if (!TryParseAddress(ipAddress, out var address))
         {
             return true;
         }
@@ -55,15 +54,21 @@ internal static class PortConflict
         }
     }
 
+    /// <summary>
+    /// Finds another Dev Proxy instance with a proxy or API listener on the given
+    /// port whose bind address overlaps the requested one. Returns null when
+    /// ownership can't be established.
+    /// </summary>
     public static ProxyInstanceState? FindOwningInstance(
-        IEnumerable<ProxyInstanceState> states, PortKind kind, int port, int excludePid)
+        IEnumerable<ProxyInstanceState> states, string? ipAddress, int port, int excludePid)
     {
-        if (port <= 0)
+        if (port <= 0 || !TryParseAddress(ipAddress, out var requested))
         {
             return null;
         }
 
-        return states.FirstOrDefault(s => s.Pid != excludePid && GetPort(s, kind) == port);
+        return states.FirstOrDefault(s => s.Pid != excludePid &&
+            (ListensOn(s.ProxyUrl, s.Port, requested, port) || ListensOn(s.ApiUrl, null, requested, port)));
     }
 
     public static string FormatMessage(PortKind kind, int port, ProxyInstanceState? owner)
@@ -94,17 +99,20 @@ internal static class PortConflict
             return null;
         }
 
-        var message = await GetMessageAsync(kind, port, cancellationToken);
+        var message = await GetMessageAsync(kind, ipAddress, port, cancellationToken);
         return message;
     }
 
-    public static async Task<string> GetMessageAsync(PortKind kind, int port, CancellationToken cancellationToken = default)
+    public static async Task<string> GetMessageAsync(
+        PortKind kind, string? ipAddress, int port, CancellationToken cancellationToken = default)
     {
         ProxyInstanceState? owner = null;
         try
         {
-            var states = await StateManager.LoadAllStatesAsync(cancellationToken);
-            owner = FindOwningInstance(states, kind, port, Environment.ProcessId);
+            // Don't prune state files here: they may be needed to recover an
+            // orphaned system-proxy registration.
+            var states = await StateManager.LoadRunningStatesAsync(cancellationToken);
+            owner = FindOwningInstance(states, ipAddress, port, Environment.ProcessId);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -127,8 +135,29 @@ internal static class PortConflict
         return false;
     }
 
-    private static int GetPort(ProxyInstanceState state, PortKind kind) =>
-        kind == PortKind.Proxy
-            ? state.Port
-            : Uri.TryCreate(state.ApiUrl, UriKind.Absolute, out var apiUri) ? apiUri.Port : -1;
+    private static bool ListensOn(string url, int? port, IPAddress requestedAddress, int requestedPort)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            (port ?? uri.Port) != requestedPort ||
+            !TryParseAddress(uri.Host, out var address))
+        {
+            return false;
+        }
+
+        return address.Equals(requestedAddress) || IsWildcard(address) || IsWildcard(requestedAddress);
+    }
+
+    private static bool IsWildcard(IPAddress address) =>
+        address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any);
+
+    private static bool TryParseAddress(string? ipAddress, out IPAddress address)
+    {
+        if (string.IsNullOrWhiteSpace(ipAddress))
+        {
+            address = IPAddress.Loopback;
+            return true;
+        }
+
+        return IPAddress.TryParse(ipAddress.Trim('[', ']'), out address!);
+    }
 }

@@ -44,16 +44,19 @@ public class PortConflictTests
         Assert.True(PortConflict.IsPortAvailable(ipAddress, port));
     }
 
+    private static ProxyInstanceState State(int pid, string proxyUrl, int port, string apiUrl) =>
+        new() { Pid = pid, ProxyUrl = proxyUrl, Port = port, ApiUrl = apiUrl };
+
     [Fact]
     public void FindOwningInstance_MatchesProxyPort()
     {
         var states = new[]
         {
-            new ProxyInstanceState { Pid = 1, Port = 8001, ApiUrl = "http://127.0.0.1:8898/" },
-            new ProxyInstanceState { Pid = 2, Port = 8000, ApiUrl = "http://127.0.0.1:8897/" }
+            State(1, "http://127.0.0.1:8001", 8001, "http://127.0.0.1:8898/"),
+            State(2, "http://127.0.0.1:8000", 8000, "http://127.0.0.1:8897/")
         };
 
-        Assert.Equal(2, PortConflict.FindOwningInstance(states, PortKind.Proxy, 8000, excludePid: 0)?.Pid);
+        Assert.Equal(2, PortConflict.FindOwningInstance(states, "127.0.0.1", 8000, excludePid: 0)?.Pid);
     }
 
     [Fact]
@@ -61,20 +64,49 @@ public class PortConflictTests
     {
         var states = new[]
         {
-            new ProxyInstanceState { Pid = 1, Port = 8001, ApiUrl = "http://127.0.0.1:8898/" },
-            new ProxyInstanceState { Pid = 2, Port = 8000, ApiUrl = "http://127.0.0.1:8897" }
+            State(1, "http://127.0.0.1:8001", 8001, "http://127.0.0.1:8898/"),
+            State(2, "http://127.0.0.1:8000", 8000, "http://127.0.0.1:8897")
         };
 
-        Assert.Equal(2, PortConflict.FindOwningInstance(states, PortKind.Api, 8897, excludePid: 0)?.Pid);
+        Assert.Equal(2, PortConflict.FindOwningInstance(states, "127.0.0.1", 8897, excludePid: 0)?.Pid);
+    }
+
+    [Fact]
+    public void FindOwningInstance_MatchesAcrossPortKinds()
+    {
+        // Another instance's API listener can hold the port requested for the proxy, and vice versa.
+        var states = new[] { State(2, "http://127.0.0.1:8000", 8000, "http://127.0.0.1:8897") };
+
+        Assert.Equal(2, PortConflict.FindOwningInstance(states, "127.0.0.1", 8897, excludePid: 0)?.Pid);
+        Assert.Equal(2, PortConflict.FindOwningInstance(states, null, 8000, excludePid: 0)?.Pid);
+    }
+
+    [Theory]
+    [InlineData("http://127.0.0.1:8000", "127.0.0.1", true)]
+    [InlineData("http://0.0.0.0:8000", "127.0.0.1", true)]
+    [InlineData("http://127.0.0.1:8000", "0.0.0.0", true)]
+    [InlineData("http://[::]:8000", "::1", true)]
+    [InlineData("http://[::1]:8000", "[::1]", true)]
+    [InlineData("http://127.0.0.1:8000", "192.168.1.10", false)]
+    [InlineData("http://[::1]:8000", "127.0.0.1", false)]
+    [InlineData("http://localhost:8000", "127.0.0.1", false)]
+    [InlineData("http://127.0.0.1:8000", "not-an-ip", false)]
+    public void FindOwningInstance_RequiresOverlappingAddress(string proxyUrl, string requestedAddress, bool expectedMatch)
+    {
+        var states = new[] { State(2, proxyUrl, 8000, "http://127.0.0.1:8897") };
+
+        var owner = PortConflict.FindOwningInstance(states, requestedAddress, 8000, excludePid: 0);
+
+        Assert.Equal(expectedMatch, owner is not null);
     }
 
     [Fact]
     public void FindOwningInstance_IgnoresCurrentProcessAndPortZero()
     {
-        var states = new[] { new ProxyInstanceState { Pid = 5, Port = 8000, ApiUrl = "http://127.0.0.1:0" } };
+        var states = new[] { State(5, "http://127.0.0.1:8000", 8000, "http://127.0.0.1:0") };
 
-        Assert.Null(PortConflict.FindOwningInstance(states, PortKind.Proxy, 8000, excludePid: 5));
-        Assert.Null(PortConflict.FindOwningInstance(states, PortKind.Api, 0, excludePid: 0));
+        Assert.Null(PortConflict.FindOwningInstance(states, "127.0.0.1", 8000, excludePid: 5));
+        Assert.Null(PortConflict.FindOwningInstance(states, "127.0.0.1", 0, excludePid: 0));
     }
 
     [Fact]
