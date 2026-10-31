@@ -563,4 +563,41 @@ public sealed class OpenApiValidationPluginTests : IDisposable
 
         Assert.Contains(Messages(result), m => m.Contains("supported maximum", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public async Task ValidatesRepeatedSchemaReferencesEfficiently()
+    {
+        var schemas = string.Join(",\n", Enumerable.Range(0, 30).Select(i =>
+            $$"""      "S{{i}}": { "allOf": [ { "$ref": "#/components/schemas/S{{i + 1}}" }, { "$ref": "#/components/schemas/S{{i + 1}}" } ] }"""));
+        var plugin = await CreatePluginWithSpecsAsync(("wide.json", $$"""
+            {
+              "openapi": "3.0.3",
+              "info": { "title": "Wide", "version": "1.0" },
+              "servers": [ { "url": "https://api.fabrikam.com" } ],
+              "paths": {
+                "/wide": {
+                  "get": {
+                    "responses": {
+                      "200": { "description": "ok", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/S0" } } } }
+                    }
+                  }
+                }
+              },
+              "components": {
+                "schemas": {
+            {{schemas}},
+                  "S30": { "type": "string" }
+                }
+              }
+            }
+            """));
+
+        var valid = plugin.Validate(TestExchange.Request("GET", "https://api.fabrikam.com/wide")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: "\"ok\"").Session);
+        var invalid = plugin.Validate(TestExchange.Request("GET", "https://api.fabrikam.com/wide")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: "1").Session);
+
+        Assert.Empty(valid!.Issues);
+        Assert.Equal("$: Expected string but got integer", Assert.Single(Messages(invalid)));
+    }
 }

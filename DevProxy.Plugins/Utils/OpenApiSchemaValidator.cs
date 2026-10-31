@@ -26,6 +26,15 @@ internal sealed record SchemaValidationError(string Path, string Message);
 internal static class OpenApiSchemaValidator
 {
     private const int MaxDepth = 64;
+    // bounds total work, e.g. for schemas that reference the same subschema repeatedly
+    private const int MaxEvaluations = 1_000_000;
+
+    private sealed class ValidationState
+    {
+        public int Evaluations { get; set; }
+        public bool BudgetExceeded { get; set; }
+        public Dictionary<(IOpenApiSchema Schema, string Path), List<SchemaValidationError>> Memo { get; } = [];
+    }
 
     public static List<SchemaValidationError> Validate(
         JsonElement value,
@@ -34,7 +43,12 @@ internal static class OpenApiSchemaValidator
         string path = "$")
     {
         var errors = new List<SchemaValidationError>();
-        ValidateCore(value, schema, direction, path, errors, 0);
+        var state = new ValidationState();
+        ValidateCore(value, schema, direction, path, errors, state, 0);
+        if (state.BudgetExceeded)
+        {
+            errors.Add(new(path, $"Validation stopped after {MaxEvaluations} schema evaluations, so the value couldn't be fully validated"));
+        }
         return errors;
     }
 
@@ -156,10 +170,16 @@ internal static class OpenApiSchemaValidator
         SchemaValidationDirection direction,
         string path,
         List<SchemaValidationError> errors,
+        ValidationState state,
         int depth)
     {
-        if (schema is null)
+        if (schema is null || state.BudgetExceeded)
         {
+            return;
+        }
+        if (++state.Evaluations > MaxEvaluations)
+        {
+            state.BudgetExceeded = true;
             return;
         }
         if (depth > MaxDepth)
@@ -178,14 +198,14 @@ internal static class OpenApiSchemaValidator
 
         if (value.ValueKind == JsonValueKind.Object)
         {
-            ValidateObject(value, schema, direction, path, errors, depth);
+            ValidateObject(value, schema, direction, path, errors, state, depth);
         }
         else if (value.ValueKind == JsonValueKind.Array && schema.Items is not null)
         {
             var i = 0;
             foreach (var item in value.EnumerateArray())
             {
-                ValidateCore(item, schema.Items, direction, $"{path}[{i}]", errors, depth + 1);
+                ValidateCore(item, schema.Items, direction, $"{path}[{i}]", errors, state, depth + 1);
                 i++;
             }
         }
@@ -194,19 +214,26 @@ internal static class OpenApiSchemaValidator
         {
             foreach (var subSchema in schema.AllOf)
             {
-                ValidateCore(value, subSchema, direction, path, errors, depth + 1);
+                foreach (var error in ValidateComposed(value, subSchema, direction, path, state, depth + 1))
+                {
+                    // subschemas can report the same error, e.g. when they reference the same schema
+                    if (!errors.Contains(error))
+                    {
+                        errors.Add(error);
+                    }
+                }
             }
         }
 
         if (schema.AnyOf is { Count: > 0 } &&
-            !schema.AnyOf.Any(s => IsValid(value, s, direction, path, depth)))
+            !schema.AnyOf.Any(s => IsValid(value, s, direction, path, state, depth)))
         {
             errors.Add(new(path, "Value doesn't match any of the schemas in 'anyOf'"));
         }
 
         if (schema.OneOf is { Count: > 0 })
         {
-            var matches = schema.OneOf.Count(s => IsValid(value, s, direction, path, depth));
+            var matches = schema.OneOf.Count(s => IsValid(value, s, direction, path, state, depth));
             if (matches == 0)
             {
                 errors.Add(new(path, "Value doesn't match any of the schemas in 'oneOf'"));
@@ -218,11 +245,24 @@ internal static class OpenApiSchemaValidator
         }
     }
 
-    private static bool IsValid(JsonElement value, IOpenApiSchema schema, SchemaValidationDirection direction, string path, int depth)
+    private static bool IsValid(JsonElement value, IOpenApiSchema schema, SchemaValidationDirection direction, string path, ValidationState state, int depth) =>
+        ValidateComposed(value, schema, direction, path, state, depth + 1).Count == 0;
+
+    // Composition keywords can reference the same subschema many times for the
+    // same value. Within a single validation, a path identifies a value, so
+    // results are memoized per (resolved schema, path) to avoid exponential work.
+    private static List<SchemaValidationError> ValidateComposed(JsonElement value, IOpenApiSchema schema, SchemaValidationDirection direction, string path, ValidationState state, int depth)
     {
+        var target = schema is OpenApiSchemaReference reference ? (IOpenApiSchema?)reference.Target ?? schema : schema;
+        if (state.Memo.TryGetValue((target, path), out var cached))
+        {
+            return cached;
+        }
+
         var subErrors = new List<SchemaValidationError>();
-        ValidateCore(value, schema, direction, path, subErrors, depth + 1);
-        return subErrors.Count == 0;
+        ValidateCore(value, schema, direction, path, subErrors, state, depth);
+        state.Memo[(target, path)] = subErrors;
+        return subErrors;
     }
 
     private static bool ValidateType(JsonElement value, IOpenApiSchema schema, string path, List<SchemaValidationError> errors)
@@ -286,6 +326,7 @@ internal static class OpenApiSchemaValidator
         SchemaValidationDirection direction,
         string path,
         List<SchemaValidationError> errors,
+        ValidationState state,
         int depth)
     {
         if (schema.Required is { Count: > 0 })
@@ -318,11 +359,11 @@ internal static class OpenApiSchemaValidator
             if (schema.Properties is not null &&
                 schema.Properties.TryGetValue(property.Name, out var propertySchema))
             {
-                ValidateCore(property.Value, propertySchema, direction, propertyPath, errors, depth + 1);
+                ValidateCore(property.Value, propertySchema, direction, propertyPath, errors, state, depth + 1);
             }
             else if (schema.AdditionalProperties is not null)
             {
-                ValidateCore(property.Value, schema.AdditionalProperties, direction, propertyPath, errors, depth + 1);
+                ValidateCore(property.Value, schema.AdditionalProperties, direction, propertyPath, errors, state, depth + 1);
             }
             else if (!schema.AdditionalPropertiesAllowed)
             {
