@@ -11,7 +11,8 @@ namespace DevProxy.Proxy;
 /// Host-side <see cref="IRootCertificateTrust"/> for the Kestrel engine. The engine mints
 /// and persists its root, then calls <see cref="EnsureTrusted"/>; this performs the actual
 /// platform trust install (macOS keychain via <see cref="MacCertificateHelper"/>, Windows
-/// CurrentUser root store) gated by the user's install/first-run configuration. The trust
+/// CurrentUser root store, Linux system store via <see cref="LinuxCertificateHelper"/> on
+/// explicit <c>cert ensure</c> only) gated by the user's install/first-run configuration. The trust
 /// decision itself lives in <see cref="RootTrustPolicy"/> (pure + unit-tested); this class
 /// is only the I/O around it.
 /// </summary>
@@ -62,7 +63,7 @@ internal sealed class RootCertificateTrust(
 
             case RootTrustAction.ManualLinux:
                 logger.LogWarning(
-                    "Trust the Dev Proxy root certificate manually so your tools accept intercepted HTTPS traffic.");
+                    "To have your tools accept intercepted HTTPS traffic, trust the Dev Proxy root certificate by running 'devproxy cert ensure' (requires sudo).");
                 break;
 
             case RootTrustAction.Skip:
@@ -90,6 +91,20 @@ internal sealed class RootCertificateTrust(
                 throw new InvalidOperationException("Failed to install the root certificate into the Windows root store.");
             }
         }
+        else if (OperatingSystem.IsLinux())
+        {
+            var store = LinuxCertificateHelper.DetectTrustStore();
+            if (store is null)
+            {
+                LinuxCertificateHelper.LogManualInstructions(logger);
+                return;
+            }
+            if (!LinuxCertificateHelper.TrustCertificate(rootCertificate, store, logger))
+            {
+                throw new InvalidOperationException("Failed to trust the root certificate in the system certificate store.");
+            }
+            logger.LogInformation("Certificate trusted successfully.");
+        }
         else
         {
             logger.LogWarning(
@@ -109,6 +124,10 @@ internal sealed class RootCertificateTrust(
         else if (OperatingSystem.IsWindows())
         {
             RemoveFromWindowsRootStore(rootCertificate);
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            LinuxCertificateHelper.RemoveTrustedCertificate(logger);
         }
         else
         {
