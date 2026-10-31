@@ -5,6 +5,7 @@
 using DevProxy.Abstractions.Models;
 using DevProxy.Abstractions.Plugins;
 using DevProxy.Abstractions.Proxy;
+using DevProxy.Abstractions.Proxy.Http;
 using DevProxy.Abstractions.Utils;
 using DevProxy.Plugins.Models;
 using DevProxy.Plugins.Utils;
@@ -68,10 +69,6 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
             return;
         }
 
-        var authorizationHeader = request.Headers.GetFirst("Authorization")?.Value;
-        var (permissionsType, tokenPermissions) = GraphUtils.GetPermissionsFromAuthorizationHeader(authorizationHeader);
-        var userIdentifiers = GraphUtils.GetUserIdentifiersFromAuthorizationHeader(authorizationHeader);
-
         if (ProxyUtils.IsGraphBatchUrl(request.RequestUri))
         {
             if (response.StatusCode != HttpStatusCode.OK)
@@ -87,6 +84,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
                 return;
             }
 
+            var (permissionsType, tokenPermissions, userIdentifiers) = GetTokenInfo(request);
             var graphVersion = ProxyUtils.IsGraphBetaUrl(request.RequestUri) ? "beta" : "v1.0";
             // analyze in parallel to limit the delay before the response is sent to the client
             var guidance = await Task.WhenAll(failedRequests.Select(failedRequest =>
@@ -109,6 +107,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
         }
         else if (response.StatusCode == HttpStatusCode.Forbidden)
         {
+            var (permissionsType, tokenPermissions, userIdentifiers) = GetTokenInfo(request);
             var (message, messageType) = await AnalyzeForbiddenRequestAsync(
                 request.Method,
                 request.RequestUri.AbsoluteUri,
@@ -125,6 +124,16 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
         }
 
         Logger.LogTrace("Left {Name}", nameof(AfterResponseAsync));
+    }
+
+    private static (GraphPermissionsType? Type, IEnumerable<string> Permissions, string[] UserIdentifiers) GetTokenInfo(IHttpRequest request)
+    {
+        var authorizationHeader = request.Headers.GetFirst("Authorization")?.Value;
+        var (permissionsType, tokenPermissions) = GraphUtils.GetPermissionsFromAuthorizationHeader(authorizationHeader);
+        var userIdentifiers = permissionsType == GraphPermissionsType.Delegated
+            ? GraphUtils.GetUserIdentifiersFromAuthorizationHeader(authorizationHeader)
+            : [];
+        return (permissionsType, tokenPermissions, userIdentifiers);
     }
 
     private void LogGuidance(string? message, MessageType messageType, LoggingContext loggingContext)
