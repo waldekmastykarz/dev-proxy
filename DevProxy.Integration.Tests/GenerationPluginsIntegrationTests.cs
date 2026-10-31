@@ -561,6 +561,43 @@ public sealed class GenerationPluginsIntegrationTests
     }
 
     [Fact]
+    public async Task OpenApiSpecGenerator_ReplacesUntypedItemsOfEmptyArrayRecordedFirst()
+    {
+        static RequestLog Exchange(string responseBody) =>
+            TestExchange
+                .Request("GET", "https://api.contoso.com/users")
+                .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: responseBody)
+                .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(
+            Exchange("""{ "tags": [] }"""),
+            Exchange("""{ "tags": [ "a", "b" ] }"""));
+
+        var tags = spec.RootElement.GetProperty("paths").GetProperty("/users").GetProperty("get")
+            .GetProperty("responses").GetProperty("200").GetProperty("content").GetProperty("application/json")
+            .GetProperty("schema").GetProperty("properties").GetProperty("tags");
+        Assert.Equal("array", tags.GetProperty("type").GetString());
+        Assert.Equal("string", tags.GetProperty("items").GetProperty("type").GetString());
+    }
+
+    [Fact]
+    public async Task OpenApiSpecGenerator_EmitsUntypedItemsForEmptyArray()
+    {
+        var exchange = TestExchange
+            .Request("GET", "https://api.contoso.com/users")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: "[]")
+            .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(exchange);
+
+        var schema = spec.RootElement.GetProperty("paths").GetProperty("/users").GetProperty("get")
+            .GetProperty("responses").GetProperty("200").GetProperty("content").GetProperty("application/json")
+            .GetProperty("schema");
+        Assert.Equal("array", schema.GetProperty("type").GetString());
+        Assert.Empty(schema.GetProperty("items").EnumerateObject());
+    }
+
+    [Fact]
     public async Task OpenApiSpecGenerator_SkipsResponseBodyWithoutContentType()
     {
         var exchange = TestExchange

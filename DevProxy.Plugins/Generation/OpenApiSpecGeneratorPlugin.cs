@@ -591,6 +591,14 @@ public sealed class OpenApiSpecGeneratorPlugin(
 
         if (source.Type == JsonSchemaType.Array && target.Type == JsonSchemaType.Array)
         {
+            // replace the untyped items placeholder generated for an empty array
+            if (target is OpenApiSchema targetArray && targetArray.Items is { Type: null } && source.Items?.Type is not null)
+            {
+                Logger.LogDebug("        Replacing untyped array items...");
+                targetArray.Items = source.Items;
+                return;
+            }
+
             Logger.LogDebug("        Merging array items...");
             MergeSchema(source.Items, target.Items);
             return;
@@ -888,7 +896,11 @@ public sealed class OpenApiSpecGeneratorPlugin(
                 break;
             case JsonValueKind.Array:
                 schema.Type = JsonSchemaType.Array;
-                schema.Items = GetSchemaFromJsonElement(jsonElement.EnumerateArray().FirstOrDefault());
+                var firstItem = jsonElement.EnumerateArray().FirstOrDefault();
+                // an empty array gives no type information, so use an untyped (any) items schema
+                schema.Items = firstItem.ValueKind == JsonValueKind.Undefined
+                    ? new OpenApiSchema()
+                    : GetSchemaFromJsonElement(firstItem);
                 break;
             default:
                 schema.Type = JsonSchemaType.Object;
