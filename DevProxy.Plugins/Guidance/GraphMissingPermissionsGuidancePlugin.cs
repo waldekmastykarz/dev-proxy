@@ -68,8 +68,9 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
             return;
         }
 
-        var (permissionsType, tokenPermissions) = GraphUtils.GetPermissionsFromAuthorizationHeader(
-            request.Headers.GetFirst("Authorization")?.Value);
+        var authorizationHeader = request.Headers.GetFirst("Authorization")?.Value;
+        var (permissionsType, tokenPermissions) = GraphUtils.GetPermissionsFromAuthorizationHeader(authorizationHeader);
+        var userIdentifiers = GraphUtils.GetUserIdentifiersFromAuthorizationHeader(authorizationHeader);
 
         if (ProxyUtils.IsGraphBatchUrl(request.RequestUri))
         {
@@ -98,6 +99,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
                     $"Batch request {failedRequest.Id} ({failedRequest.Method} {failedRequest.Url})",
                     permissionsType,
                     tokenPermissions,
+                    userIdentifiers,
                     cancellationToken);
             }));
             foreach (var (message, messageType) in guidance)
@@ -113,6 +115,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
                 "Request",
                 permissionsType,
                 tokenPermissions,
+                userIdentifiers,
                 cancellationToken);
             LogGuidance(message, messageType, loggingContext);
         }
@@ -138,6 +141,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
         string requestDescription,
         GraphPermissionsType? permissionsType,
         IEnumerable<string> tokenPermissions,
+        string[] userIdentifiers,
         CancellationToken cancellationToken)
     {
         if (permissionsType is null)
@@ -168,7 +172,8 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
         // /users/{id} but only grant access to the signed-in user
         var selfOnlyNote = string.Empty;
         if (permissionsType == GraphPermissionsType.Delegated &&
-            tokenizedUrl.StartsWith("/users/", StringComparison.OrdinalIgnoreCase))
+            tokenizedUrl.StartsWith("/users/", StringComparison.OrdinalIgnoreCase) &&
+            !IsSignedInUser(absoluteUrl, userIdentifiers))
         {
             var selfOnlyPermissions = requiredPermissions
                 .Where(p => SelfOnlyDelegatedPermissions.Contains(p.Value))
@@ -325,6 +330,19 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
             Logger.LogDebug(ex, "Failed to parse batch request or response");
             return [];
         }
+    }
+
+    private static bool IsSignedInUser(string absoluteUrl, string[] userIdentifiers)
+    {
+        // segments: "/", "{version}/", "users/", "{id}/", ...
+        var segments = new Uri(absoluteUrl).Segments;
+        if (userIdentifiers.Length == 0 || segments.Length < 4)
+        {
+            return false;
+        }
+
+        var userId = Uri.UnescapeDataString(segments[3].TrimEnd('/'));
+        return userIdentifiers.Contains(userId, StringComparer.OrdinalIgnoreCase);
     }
 
     private static string GetInstructions(GraphPermissionsType permissionsType) => permissionsType switch

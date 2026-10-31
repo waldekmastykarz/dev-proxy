@@ -34,6 +34,14 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
         ]
         """;
 
+    private const string SelfOnlyUserPermissionsJson = """
+        [
+          { "value": "User.Read", "scopeType": "DelegatedWork", "isLeastPrivilege": false, "isHidden": false },
+          { "value": "User.Read.All", "scopeType": "DelegatedWork", "isLeastPrivilege": false, "isHidden": false },
+          { "value": "User.ReadBasic.All", "scopeType": "DelegatedWork", "isLeastPrivilege": true, "isHidden": false }
+        ]
+        """;
+
     private static ISet<UrlToWatch> GraphWatch => KestrelProxyHarness.BuildUrlsToWatch("graph.microsoft.com");
 
     [Fact]
@@ -274,17 +282,11 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
     [Fact]
     public async Task Forbidden_DelegatedSelfOnlyPermissionForOtherUser_LogsFailed()
     {
-        using var handler = new StubPermissionsHandler("""
-            [
-              { "value": "User.Read", "scopeType": "DelegatedWork", "isLeastPrivilege": false, "isHidden": false },
-              { "value": "User.Read.All", "scopeType": "DelegatedWork", "isLeastPrivilege": false, "isHidden": false },
-              { "value": "User.ReadBasic.All", "scopeType": "DelegatedWork", "isLeastPrivilege": true, "isHidden": false }
-            ]
-            """);
+        using var handler = new StubPermissionsHandler(SelfOnlyUserPermissionsJson);
         var (plugin, factory) = CreatePlugin(handler);
 
         var exchange = TestExchange
-            .Request("GET", "https://graph.microsoft.com/v1.0/users/8e6b0bba-5bce-4b1b-9d5b-1f5e8b0d1a6c", [("Authorization", BearerToken(scp: "User.Read"))])
+            .Request("GET", "https://graph.microsoft.com/v1.0/users/8e6b0bba-5bce-4b1b-9d5b-1f5e8b0d1a6c", [("Authorization", BearerToken(scp: "User.Read", oid: "1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d"))])
             .WithResponse(HttpStatusCode.Forbidden);
         await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
 
@@ -293,6 +295,24 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
         Assert.Contains("least privileged permission: User.ReadBasic.All", log.Message, StringComparison.Ordinal);
         Assert.Contains("higher-privileged permissions: User.Read.All.", log.Message, StringComparison.Ordinal);
         Assert.Contains("only allow access to the signed-in user", log.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Forbidden_DelegatedSelfOnlyPermissionForSignedInUser_LogsWarningAboutOtherCauses()
+    {
+        using var handler = new StubPermissionsHandler(SelfOnlyUserPermissionsJson);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        const string signedInUserId = "8e6b0bba-5bce-4b1b-9d5b-1f5e8b0d1a6c";
+        var exchange = TestExchange
+            .Request("GET", $"https://graph.microsoft.com/v1.0/users/{signedInUserId}", [("Authorization", BearerToken(scp: "User.Read", oid: signedInUserId))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        Assert.Empty(factory.LogsOfType(MessageType.Failed));
+        var log = Assert.Single(factory.LogsOfType(MessageType.Warning));
+        Assert.Contains("User.Read", log.Message, StringComparison.Ordinal);
+        Assert.Contains("another reason", log.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -329,9 +349,13 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
         return (plugin, factory);
     }
 
-    private static string BearerToken(string? scp = null, string[]? roles = null)
+    private static string BearerToken(string? scp = null, string[]? roles = null, string? oid = null)
     {
         var payload = new Dictionary<string, object> { ["aud"] = "https://graph.microsoft.com" };
+        if (oid is not null)
+        {
+            payload["oid"] = oid;
+        }
         if (scp is not null)
         {
             payload["scp"] = scp;

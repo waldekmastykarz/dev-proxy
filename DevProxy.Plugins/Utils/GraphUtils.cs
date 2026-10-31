@@ -160,6 +160,32 @@ sealed class GraphUtils(
         }
     }
 
+    internal static string[] GetUserIdentifiersFromAuthorizationHeader(string? authorizationHeader)
+    {
+        if (string.IsNullOrEmpty(authorizationHeader))
+        {
+            return [];
+        }
+
+        var token = authorizationHeader.Replace("Bearer ", string.Empty, StringComparison.OrdinalIgnoreCase).Trim();
+        if (token.Split('.').Length != 3)
+        {
+            return [];
+        }
+
+        try
+        {
+            var jwtSecurityToken = new JwtSecurityTokenHandler().ReadJwtToken(token);
+            return [.. jwtSecurityToken.Claims
+                .Where(c => c.Type is "oid" or "upn" or "preferred_username" && !string.IsNullOrEmpty(c.Value))
+                .Select(c => c.Value)];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
     internal static string GetTokenizedUrl(string absoluteUrl)
     {
         absoluteUrl = CanonicalizeDriveItemPathUrl(absoluteUrl);
