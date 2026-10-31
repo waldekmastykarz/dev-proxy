@@ -471,6 +471,65 @@ public sealed class ProcessSmokeTests
         }
     }
 
+    [Fact]
+    public async Task Stdio_LargeMessageThroughStreamingChild_DoesNotDeadlock()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var hostDll = LocateHostDll();
+        Assert.True(File.Exists(hostDll), $"DevProxy host not built at {hostDll}. Run `dotnet build DevProxy` first.");
+
+        var workDir = Directory.CreateTempSubdirectory("devproxy-stdio-large-");
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(workDir.FullName, "stdio-mocks.json"), StdioMocksFile);
+            await File.WriteAllTextAsync(Path.Combine(workDir.FullName, "devproxyrc.json"),
+                StdioConfigFile.Replace("\"blockUnmockedRequests\": true", "\"blockUnmockedRequests\": false", StringComparison.Ordinal));
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                WorkingDirectory = workDir.FullName,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            psi.ArgumentList.Add(hostDll);
+            psi.ArgumentList.Add("stdio");
+            psi.ArgumentList.Add("--config-file");
+            psi.ArgumentList.Add(Path.Combine(workDir.FullName, "devproxyrc.json"));
+            psi.ArgumentList.Add("--");
+            psi.ArgumentList.Add("cat");
+
+            using var process = new Process { StartInfo = psi };
+            Assert.True(process.Start(), "Failed to start DevProxy stdio process.");
+            try
+            {
+                // Larger than typical pipe buffers so the child blocks writing stdout
+                // while the proxy is still writing the message to its stdin.
+                var line = new string('x', 1024 * 1024);
+                using var cts = new CancellationTokenSource(s_startupTimeout);
+                var readTask = ReadLineAsync(process.StandardOutput, cts.Token);
+                await process.StandardInput.WriteAsync(line + "\n");
+                await process.StandardInput.FlushAsync();
+
+                Assert.Equal(line, await readTask);
+            }
+            finally
+            {
+                StopHost(process);
+            }
+        }
+        finally
+        {
+            workDir.Delete(recursive: true);
+        }
+    }
+
     private static Process StartHost(string hostDll, string workDir)
     {
         var psi = new ProcessStartInfo

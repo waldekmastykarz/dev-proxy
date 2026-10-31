@@ -40,7 +40,9 @@ internal sealed class ProxySession(
     private Stream? _childStdin;
     private StdioSession? _stdioSession;
 
-    private readonly SemaphoreSlim _writeSemaphore = new(1, 1);
+    // Separate gates so stdout can drain while a large stdin message is being written
+    private readonly SemaphoreSlim _childStdinSemaphore = new(1, 1);
+    private readonly SemaphoreSlim _parentStdoutSemaphore = new(1, 1);
     private bool _disposed;
 
     /// <summary>
@@ -55,7 +57,7 @@ internal sealed class ProxySession(
         }
 
         var bytes = Encoding.UTF8.GetBytes(message);
-        await _writeSemaphore.WaitAsync();
+        await _childStdinSemaphore.WaitAsync();
         try
         {
             Log("INJECT >>>", bytes, bytes.Length);
@@ -68,7 +70,7 @@ internal sealed class ProxySession(
         }
         finally
         {
-            _ = _writeSemaphore.Release();
+            _ = _childStdinSemaphore.Release();
         }
     }
 
@@ -84,7 +86,7 @@ internal sealed class ProxySession(
         }
 
         var bytes = Encoding.UTF8.GetBytes(message);
-        await _writeSemaphore.WaitAsync();
+        await _parentStdoutSemaphore.WaitAsync();
         try
         {
             Log("INJECT <<< STDOUT", bytes, bytes.Length);
@@ -97,7 +99,7 @@ internal sealed class ProxySession(
         }
         finally
         {
-            _ = _writeSemaphore.Release();
+            _ = _parentStdoutSemaphore.Release();
         }
     }
 
@@ -288,7 +290,7 @@ internal sealed class ProxySession(
         // Only forward to child if not consumed
         if (!responseState.HasBeenSet)
         {
-            await _writeSemaphore.WaitAsync(_cts.Token);
+            await _childStdinSemaphore.WaitAsync(_cts.Token);
             try
             {
                 await _childStdin!.WriteAsync(message, _cts.Token);
@@ -296,7 +298,7 @@ internal sealed class ProxySession(
             }
             finally
             {
-                _ = _writeSemaphore.Release();
+                _ = _childStdinSemaphore.Release();
             }
         }
         else
@@ -356,7 +358,7 @@ internal sealed class ProxySession(
                 // Only forward to parent if not consumed
                 if (!responseState.HasBeenSet)
                 {
-                    await _writeSemaphore.WaitAsync(_cts.Token);
+                    await _parentStdoutSemaphore.WaitAsync(_cts.Token);
                     try
                     {
                         await _parentStdout!.WriteAsync(buffer.AsMemory(0, bytesRead), _cts.Token);
@@ -364,7 +366,7 @@ internal sealed class ProxySession(
                     }
                     finally
                     {
-                        _ = _writeSemaphore.Release();
+                        _ = _parentStdoutSemaphore.Release();
                     }
                 }
 
@@ -653,6 +655,7 @@ internal sealed class ProxySession(
         _parentStdout?.Dispose();
         _process?.Dispose();
         _cts.Dispose();
-        _writeSemaphore.Dispose();
+        _childStdinSemaphore.Dispose();
+        _parentStdoutSemaphore.Dispose();
     }
 }
