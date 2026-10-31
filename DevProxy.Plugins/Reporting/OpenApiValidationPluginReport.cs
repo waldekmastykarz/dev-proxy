@@ -47,6 +47,11 @@ public sealed class OpenApiValidationPluginReport : IMarkdownReport, IPlainTextR
     public required int ValidatedRequests { get; init; }
     public required IEnumerable<OpenApiValidationResult> Results { get; init; }
     public IEnumerable<string>? UnmatchedRequests { get; init; }
+    /// <summary>
+    /// Parts of validated requests that weren't validated, e.g. bodies
+    /// exceeding the maximum supported size, with the reason.
+    /// </summary>
+    public IEnumerable<string>? SkippedValidations { get; init; }
 
     public string? ToMarkdown()
     {
@@ -55,8 +60,12 @@ public sealed class OpenApiValidationPluginReport : IMarkdownReport, IPlainTextR
             .AppendLine()
             .AppendLine(CultureInfo.InvariantCulture, $"- Validated requests: {ValidatedRequests}")
             .AppendLine(CultureInfo.InvariantCulture, $"- Requests with issues: {Results.Count()}");
+        if (SkippedValidations?.Any() == true)
+        {
+            _ = sb.AppendLine(CultureInfo.InvariantCulture, $"- Skipped validations: {SkippedValidations.Count()}");
+        }
 
-        if (!Results.Any())
+        if (!Results.Any() && SkippedValidations?.Any() != true)
         {
             _ = sb.AppendLine()
                 .AppendLine("✅ All validated requests and responses match their OpenAPI specs.");
@@ -92,6 +101,15 @@ public sealed class OpenApiValidationPluginReport : IMarkdownReport, IPlainTextR
             }
         }
 
+        if (SkippedValidations?.Any() == true)
+        {
+            _ = sb.AppendLine()
+                .AppendLine("## Skipped validations")
+                .AppendLine()
+                .AppendJoin(Environment.NewLine, SkippedValidations.Select(r => $"- {r}"))
+                .AppendLine();
+        }
+
         if (UnmatchedRequests?.Any() == true)
         {
             _ = sb.AppendLine()
@@ -111,6 +129,10 @@ public sealed class OpenApiValidationPluginReport : IMarkdownReport, IPlainTextR
             .AppendLine()
             .AppendLine(CultureInfo.InvariantCulture, $"Validated requests: {ValidatedRequests}")
             .AppendLine(CultureInfo.InvariantCulture, $"Requests with issues: {Results.Count()}");
+        if (SkippedValidations?.Any() == true)
+        {
+            _ = sb.AppendLine(CultureInfo.InvariantCulture, $"Skipped validations: {SkippedValidations.Count()}");
+        }
 
         foreach (var result in Results)
         {
@@ -135,6 +157,15 @@ public sealed class OpenApiValidationPluginReport : IMarkdownReport, IPlainTextR
                 _ = sb.AppendLine(CultureInfo.InvariantCulture,
                     $"- [{issue.Location.ToString().ToLowerInvariant()}] {issue}");
             }
+        }
+
+        if (SkippedValidations?.Any() == true)
+        {
+            _ = sb.AppendLine()
+                .AppendLine("Skipped validations:")
+                .AppendLine()
+                .AppendJoin(Environment.NewLine, SkippedValidations.Select(r => $"- {r}"))
+                .AppendLine();
         }
 
         if (UnmatchedRequests?.Any() == true)

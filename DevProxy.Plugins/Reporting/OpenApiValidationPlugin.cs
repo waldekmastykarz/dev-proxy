@@ -169,6 +169,7 @@ public sealed class OpenApiValidationPlugin(
         var validated = 0;
         var results = new List<OpenApiValidationResult>();
         var unmatched = new List<string>();
+        var skipped = new List<string>();
 
         foreach (var session in sessions)
         {
@@ -182,6 +183,7 @@ public sealed class OpenApiValidationPlugin(
             }
 
             validated++;
+            skipped.AddRange(outcome.Notes.Select(n => $"{session.Request.Method} {session.Request.Url}: {n}"));
             if (outcome.Result.Issues.Any())
             {
                 results.Add(outcome.Result);
@@ -200,7 +202,8 @@ public sealed class OpenApiValidationPlugin(
         {
             ValidatedRequests = validated,
             Results = results,
-            UnmatchedRequests = Configuration.ReportUnmatchedRequests ? [.. unmatched.Distinct()] : null
+            UnmatchedRequests = Configuration.ReportUnmatchedRequests ? [.. unmatched.Distinct()] : null,
+            SkippedValidations = skipped.Count > 0 ? skipped : null
         };
         StoreReport(report, e);
 

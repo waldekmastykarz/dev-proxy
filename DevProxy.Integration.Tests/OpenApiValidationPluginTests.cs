@@ -362,6 +362,29 @@ public sealed class OpenApiValidationPluginTests : IDisposable
     }
 
     [Fact]
+    public async Task ReportsSkippedValidations()
+    {
+        var plugin = await CreatePluginAsync();
+        var args = Recording([
+            Get("https://api.contoso.com/v1/users/1", HttpStatusCode.OK, """{ "id": 1, "name": "Alex" }""").AsRequestLog(MessageType.InterceptedResponse),
+            Get("https://api.contoso.com/v1/users/2", HttpStatusCode.OK, $$"""{ "id": 2, "name": "{{new string('a', 5 * 1024 * 1024)}}" }""").AsRequestLog(MessageType.InterceptedResponse),
+        ]);
+
+        await plugin.AfterRecordingStopAsync(args, CancellationToken.None);
+
+        var report = Assert.IsType<OpenApiValidationPluginReport>(
+            ((Dictionary<string, object>)args.GlobalData[ProxyUtils.ReportsKey])[plugin.Name]);
+        Assert.Equal(2, report.ValidatedRequests);
+        Assert.Empty(report.Results);
+        var skipped = Assert.Single(report.SkippedValidations!);
+        Assert.StartsWith("GET https://api.contoso.com/v1/users/2: Skipped validating the response body", skipped, StringComparison.Ordinal);
+        var markdown = report.ToMarkdown()!;
+        Assert.DoesNotContain("All validated requests", markdown, StringComparison.Ordinal);
+        Assert.Contains("## Skipped validations", markdown, StringComparison.Ordinal);
+        Assert.Contains(skipped, report.ToPlainText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task LoadsYamlOpenApi31SpecsFromFolder()
     {
         var specsDir = Directory.CreateDirectory(Path.Combine(_dir.FullName, "specs", "nested"));
