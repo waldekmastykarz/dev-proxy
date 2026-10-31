@@ -280,6 +280,18 @@ internal static class StateManager
     }
 
     /// <summary>
+    /// Deletes the state record of the given instance. The on-disk record is
+    /// re-read and only removed if it still describes the same instance, so a
+    /// newer instance that reused the PID and published its own state keeps it.
+    /// </summary>
+    public static async Task DeleteStateAsync(ProxyInstanceState state, CancellationToken cancellationToken = default)
+    {
+        await DeleteStateFileIfMatchesAsync(GetInstanceStateFilePath(state.Pid), state, cancellationToken);
+        await DeleteStateFileIfMatchesAsync(GetStateFilePath(), state, cancellationToken);
+        DeleteTokenIfProcessGone(state.Pid);
+    }
+
+    /// <summary>
     /// Deletes the state file for the current process.
     /// </summary>
     public static Task DeleteStateAsync(CancellationToken cancellationToken = default)
@@ -416,7 +428,7 @@ internal static class StateManager
         if (!IsInstanceAlive(state))
         {
             // Clean up stale state file
-            DeleteFile(filePath);
+            await DeleteStateFileIfMatchesAsync(filePath, state, cancellationToken);
             DeleteTokenIfProcessGone(state.Pid);
             return null;
         }
@@ -451,6 +463,22 @@ internal static class StateManager
         catch (IOException)
         {
             return null;
+        }
+    }
+
+    // Re-reads the file right before deleting to avoid removing a record that
+    // a newer instance reusing the PID has written since it was loaded.
+    private static async Task DeleteStateFileIfMatchesAsync(
+        string filePath,
+        ProxyInstanceState expected,
+        CancellationToken cancellationToken)
+    {
+        var current = await ReadStateFromFileAsync(filePath, cancellationToken);
+        if (current is not null &&
+            current.Pid == expected.Pid &&
+            current.ProcessStartTime == expected.ProcessStartTime)
+        {
+            DeleteFile(filePath);
         }
     }
 

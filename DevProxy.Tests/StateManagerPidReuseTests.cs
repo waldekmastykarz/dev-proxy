@@ -10,6 +10,7 @@ using Xunit;
 
 namespace DevProxy.Tests;
 
+[Collection("management-environment")]
 public class StateManagerPidReuseTests
 {
     [Fact]
@@ -114,6 +115,29 @@ public class StateManagerPidReuseTests
             StateManager.VerifyProcessIdentity(process, new ProxyInstanceState { Pid = process.Id, ProcessStartTime = startTime.AddMinutes(-30) }));
         Assert.Equal(ProcessIdentity.NotRecorded,
             StateManager.VerifyProcessIdentity(process, new ProxyInstanceState { Pid = process.Id }));
+    }
+
+    [Fact]
+    public async Task DeleteStateAsync_RecordReplacedByNewInstance_KeepsNewRecord()
+    {
+        const int pid = int.MaxValue - 7;
+        var path = StateManager.GetInstanceStateFilePath(pid);
+        var stale = new ProxyInstanceState { Pid = pid, ProcessStartTime = DateTimeOffset.UtcNow.AddHours(-1) };
+        var replacement = new ProxyInstanceState { Pid = pid, ProcessStartTime = DateTimeOffset.UtcNow };
+        try
+        {
+            await StateManager.SaveStateAsync(replacement);
+
+            await StateManager.DeleteStateAsync(stale);
+            Assert.True(File.Exists(path));
+
+            await StateManager.DeleteStateAsync(replacement);
+            Assert.False(File.Exists(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]
