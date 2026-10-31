@@ -141,7 +141,30 @@ internal static class OpenApiSchemaSampleGenerator
 
         // for non-object values, combine the constraints of all branches
         // so that the value satisfies all of them
-        return GenerateSample(CombineConstraints([schema, .. schema.AllOf ?? []]), depth + 1, visiting);
+        return GenerateSample(CombineConstraints(FlattenAllOf(schema, depth)), depth + 1, visiting);
+    }
+
+    private static IEnumerable<IOpenApiSchema> FlattenAllOf(IOpenApiSchema schema, int depth)
+    {
+        yield return schema;
+
+        if (depth > MaxDepth)
+        {
+            yield break;
+        }
+
+        foreach (var subSchema in schema.AllOf ?? [])
+        {
+            if (subSchema is null)
+            {
+                continue;
+            }
+
+            foreach (var nested in FlattenAllOf(subSchema, depth + 1))
+            {
+                yield return nested;
+            }
+        }
     }
 
     private static OpenApiSchema CombineConstraints(IEnumerable<IOpenApiSchema?> schemas)
@@ -215,7 +238,15 @@ internal static class OpenApiSchemaSampleGenerator
     private static JsonArray GenerateArraySample(IOpenApiSchema schema, int depth, HashSet<string> visiting)
     {
         var item = GenerateSample(schema.Items, depth + 1, visiting);
-        return item is null ? [] : [item];
+        if (item is null)
+        {
+            // null is a valid item when the item schema allows only null,
+            // otherwise it's a recursion cut-off
+            return schema.Items is not null && GetEffectiveType(schema.Items) == JsonSchemaType.Null ?
+                [null] :
+                [];
+        }
+        return [item];
     }
 
     private static string GetStringSample(IOpenApiSchema schema)
@@ -378,11 +409,11 @@ internal static class OpenApiSchemaSampleGenerator
         }
         if (schema.Minimum is not null)
         {
-            description["minimum"] = ToNumberNode(schema.Minimum.ToString());
+            MergeDescription(description, new JsonObject { ["minimum"] = ToNumberNode(schema.Minimum.ToString()) });
         }
         if (schema.Maximum is not null)
         {
-            description["maximum"] = ToNumberNode(schema.Maximum.ToString());
+            MergeDescription(description, new JsonObject { ["maximum"] = ToNumberNode(schema.Maximum.ToString()) });
         }
         if (schema.Enum is { Count: > 0 })
         {
@@ -431,6 +462,12 @@ internal static class OpenApiSchemaSampleGenerator
         return description;
     }
 
+    private static bool TryGetDecimal(JsonNode? node, out decimal value)
+    {
+        value = 0;
+        return node is JsonValue jsonValue && jsonValue.TryGetValue(out value);
+    }
+
     private static JsonValue? ToNumberNode(string? value) =>
         decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) ?
             JsonValue.Create(number) :
@@ -448,7 +485,30 @@ internal static class OpenApiSchemaSampleGenerator
             if (key == "properties" && value is JsonObject sourceProperties &&
                 target["properties"] is JsonObject targetProperties)
             {
-                MergeInto(targetProperties, sourceProperties);
+                foreach (var (name, sourceProperty) in sourceProperties)
+                {
+                    if (sourceProperty is JsonObject sourcePropertyObject &&
+                        targetProperties[name] is JsonObject targetPropertyObject)
+                    {
+                        MergeDescription(targetPropertyObject, sourcePropertyObject);
+                    }
+                    else
+                    {
+                        targetProperties[name] = sourceProperty?.DeepClone();
+                    }
+                }
+                continue;
+            }
+            // allOf requires all constraints, so keep the stricter bound
+            if (key is "minimum" or "maximum" &&
+                TryGetDecimal(value, out var sourceBound) &&
+                TryGetDecimal(target[key], out var targetBound))
+            {
+                var isStricter = key == "minimum" ? sourceBound > targetBound : sourceBound < targetBound;
+                if (isStricter)
+                {
+                    target[key] = value!.DeepClone();
+                }
                 continue;
             }
             if (key == "required" && value is JsonArray sourceRequired &&

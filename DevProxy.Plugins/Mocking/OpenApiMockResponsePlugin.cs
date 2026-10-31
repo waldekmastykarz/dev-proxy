@@ -121,6 +121,11 @@ public sealed class OpenApiMockResponsePlugin(
 
         var (statusCode, response) = GetMockResponse(operation);
         var (contentType, mediaType) = GetMediaType(response);
+        if (mediaType is not null && contentType is not null && !CanGenerateBody(contentType, mediaType))
+        {
+            Logger.LogRequest($"Can't generate {contentType} response without an example in the OpenAPI spec", MessageType.Skipped, new LoggingContext(e.ProxySession));
+            return;
+        }
 
         string? body = null;
         if (mediaType is not null && statusCode != HttpStatusCode.NoContent)
@@ -274,6 +279,13 @@ public sealed class OpenApiMockResponsePlugin(
         return (contentType, media.Value);
     }
 
+    // JSON and text bodies can be generated from the schema. For other media
+    // types, eg. XML, only string examples from the spec can be used as-is
+    private static bool CanGenerateBody(string contentType, IOpenApiMediaType mediaType) =>
+        IsJsonContentType(contentType) ||
+        contentType.StartsWith("text/", StringComparison.OrdinalIgnoreCase) ||
+        GetExample(mediaType) is JsonValue example && example.GetValueKind() == JsonValueKind.String;
+
     private static bool IsJsonContentType(string contentType) =>
         contentType.Contains("json", StringComparison.OrdinalIgnoreCase) ||
         contentType.Contains('*', StringComparison.Ordinal);
@@ -344,9 +356,16 @@ public sealed class OpenApiMockResponsePlugin(
                 return null;
             }
 
+            var schemaDescription = OpenApiSchemaSampleGenerator.Describe(schema);
+            var expectedType = schemaDescription["type"]?.GetValue<string>();
+            if (expectedType == "null")
+            {
+                // the only valid value is null, so there's nothing to generate
+                return null;
+            }
+
             Logger.LogInformation("Generating response for {Method} {Path} using language model...", method, pathTemplate);
 
-            var schemaDescription = OpenApiSchemaSampleGenerator.Describe(schema);
             var response = await _languageModelClient.GenerateChatCompletionAsync(PromptFileName, new()
             {
                 { "request", $"{method} {pathTemplate}" },
@@ -354,7 +373,6 @@ public sealed class OpenApiMockResponsePlugin(
                 { "schema", schemaDescription.ToJsonString(ProxyUtils.JsonSerializerOptions) }
             }, cancellationToken);
 
-            var expectedType = schemaDescription["type"]?.GetValue<string>();
             var json = NormalizeToExpectedType(ExtractJson(response?.Response), expectedType);
             if (json is null)
             {
