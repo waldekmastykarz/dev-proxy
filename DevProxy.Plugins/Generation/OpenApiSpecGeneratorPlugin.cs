@@ -305,6 +305,7 @@ public sealed class OpenApiSpecGeneratorPlugin(
         }
 
         Logger.LogDebug("  Processing request headers...");
+        var addedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var header in headers)
         {
             var lowerCaseHeaderName = header.Name.ToLowerInvariant();
@@ -317,6 +318,12 @@ public sealed class OpenApiSpecGeneratorPlugin(
             if (Models.Http.AuthHeaders.Contains(lowerCaseHeaderName))
             {
                 Logger.LogDebug("    Skipping auth header {HeaderName}", header.Name);
+                continue;
+            }
+
+            if (!addedHeaders.Add(header.Name))
+            {
+                Logger.LogDebug("    Header {HeaderName} already added", header.Name);
                 continue;
             }
 
@@ -388,17 +395,22 @@ public sealed class OpenApiSpecGeneratorPlugin(
         var openApiResponse = new OpenApiResponse
         {
             Description = response.StatusDescription,
-            Headers = new Dictionary<string, IOpenApiHeader>(),
+            Headers = new Dictionary<string, IOpenApiHeader>(StringComparer.OrdinalIgnoreCase),
             Content = new Dictionary<string, IOpenApiMediaType>()
         };
         var responseCode = ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture);
-        if (response.HasBody)
+        var responseMediaType = GetMediaType(response.ContentType);
+        if (response.HasBody && string.IsNullOrEmpty(responseMediaType))
+        {
+            Logger.LogDebug("    Response has body but no content type");
+        }
+        else if (response.HasBody)
         {
             Logger.LogDebug("    Response has body");
 
-            openApiResponse.Content?.Add(GetMediaType(response.ContentType), new OpenApiMediaType()
+            openApiResponse.Content?.Add(responseMediaType, new OpenApiMediaType()
             {
-                Schema = GetSchemaFromBody(GetMediaType(response.ContentType), response.BodyString)
+                Schema = GetSchemaFromBody(responseMediaType, response.BodyString)
             });
         }
         else
@@ -644,7 +656,7 @@ public sealed class OpenApiSpecGeneratorPlugin(
         }
 
         Logger.LogDebug("    Merging request body into operation...");
-        MergeSchema(bodyFromOperation.Schema, requestBody.Content.FirstOrDefault().Value.Schema);
+        MergeSchema(requestBody.Content.FirstOrDefault().Value.Schema, bodyFromOperation.Schema);
     }
 
     private void AddOrMergeResponse(OpenApiOperation operation, OpenApiResponses? apiResponses)
@@ -696,7 +708,7 @@ public sealed class OpenApiSpecGeneratorPlugin(
         }
 
         Logger.LogDebug("    Merging response {ApiResponseStatusCode}/{ApiResponseContentType} into operation...", apiResponseStatusCode, apiResponseContentType);
-        MergeSchema(contentFromOperation.Schema, apiResponse.Content.First().Value.Schema);
+        MergeSchema(apiResponse.Content.First().Value.Schema, contentFromOperation.Schema);
     }
 
     /**

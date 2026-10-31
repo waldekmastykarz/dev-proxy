@@ -440,6 +440,60 @@ public sealed class GenerationPluginsIntegrationTests
     }
 
     [Fact]
+    public async Task OpenApiSpecGenerator_DeduplicatesRepeatedHeaders()
+    {
+        var exchange = TestExchange
+            .Request("GET", "https://api.contoso.com/users", headers: [("X-Custom-Request", "a"), ("x-custom-request", "b")])
+            .WithResponse(
+                HttpStatusCode.OK,
+                headers: [("Content-Type", "application/json"), ("X-Custom-Response", "a"), ("x-custom-response", "b")],
+                body: """[]""")
+            .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(exchange);
+
+        var operation = spec.RootElement.GetProperty("paths").GetProperty("/users").GetProperty("get");
+        Assert.Equal(["X-Custom-Request"], ParameterNames(operation, "header"));
+        var responseHeaders = operation.GetProperty("responses").GetProperty("200").GetProperty("headers").EnumerateObject().Select(h => h.Name).ToArray();
+        Assert.Equal(["X-Custom-Response"], responseHeaders);
+    }
+
+    [Fact]
+    public async Task OpenApiSpecGenerator_MergesBodySchemasAcrossRequests()
+    {
+        static RequestLog Exchange(string requestBody, string responseBody) =>
+            TestExchange
+                .Request("POST", "https://api.contoso.com/users", headers: [("Content-Type", "application/json")], body: requestBody)
+                .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: responseBody)
+                .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(
+            Exchange("""{ "id": 1 }""", """{ "id": 1 }"""),
+            Exchange("""{ "id": 2, "name": "alpha" }""", """{ "id": 2, "name": "alpha" }"""));
+
+        var operation = spec.RootElement.GetProperty("paths").GetProperty("/users").GetProperty("post");
+        static string[] PropertyNames(JsonElement content) =>
+            [.. content.GetProperty("application/json").GetProperty("schema").GetProperty("properties").EnumerateObject().Select(p => p.Name)];
+
+        Assert.Equal(["id", "name"], PropertyNames(operation.GetProperty("requestBody").GetProperty("content")));
+        Assert.Equal(["id", "name"], PropertyNames(operation.GetProperty("responses").GetProperty("200").GetProperty("content")));
+    }
+
+    [Fact]
+    public async Task OpenApiSpecGenerator_SkipsResponseBodyWithoutContentType()
+    {
+        var exchange = TestExchange
+            .Request("GET", "https://api.contoso.com/users")
+            .WithResponse(HttpStatusCode.OK, body: "alpha")
+            .AsRequestLog(MessageType.InterceptedResponse);
+
+        using var spec = await GenerateOpenApiSpecAsync(exchange);
+
+        var response = spec.RootElement.GetProperty("paths").GetProperty("/users").GetProperty("get").GetProperty("responses").GetProperty("200");
+        Assert.False(response.TryGetProperty("content", out _));
+    }
+
+    [Fact]
     public async Task TypeSpecGenerator_WritesSpec()
     {
         var logger = new MessageCapturingLogger<TypeSpecGeneratorPlugin>();
