@@ -2,7 +2,11 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using DevProxy.Plugins.Models;
 using DevProxy.Plugins.Utils;
+using Microsoft.Extensions.Logging.Abstractions;
+using System.Net;
+using System.Text;
 using Xunit;
 
 namespace DevProxy.Integration.Tests;
@@ -104,6 +108,55 @@ public class GraphUtilsTests
         Assert.Equal(
             "/sites/root/lists/{lists-id}/items/{items-id}",
             GraphUtils.GetTokenizedUrl("https://graph.microsoft.com/v1.0/sites/root/lists/1/items/1"));
+
+    [Theory]
+    [InlineData("/users/{users-id}/messages")]
+    [InlineData("/users(<value>)/messages")]
+    public async Task UpdateUserScopesAsync_OtherUserEndpoint_ReplacesMinimalScope(string url)
+    {
+        using var handler = new PermissionsHandler("""[{"value":"Mail.Read"},{"value":"Mail.Read.Shared"}]""");
+        using var httpClient = new HttpClient(handler);
+        var graphUtils = new GraphUtils(httpClient, NullLogger<GraphUtils>.Instance);
+
+        var scopes = await graphUtils.UpdateUserScopesAsync(
+            ["Mail.Read"],
+            [new MethodAndUrl("GET", url)],
+            GraphPermissionsType.Delegated);
+
+        Assert.Equal(["Mail.Read.Shared"], scopes);
+        var requestUri = Assert.Single(handler.RequestUris);
+        Assert.Contains($"requesturl={url}", Uri.UnescapeDataString(requestUri.Query), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task UpdateUserScopesAsync_NoOtherUserEndpoint_ReturnsOriginalScopes()
+    {
+        using var handler = new PermissionsHandler("[]");
+        using var httpClient = new HttpClient(handler);
+        var graphUtils = new GraphUtils(httpClient, NullLogger<GraphUtils>.Instance);
+
+        var scopes = await graphUtils.UpdateUserScopesAsync(
+            ["Mail.Read"],
+            [new MethodAndUrl("GET", "/me/messages")],
+            GraphPermissionsType.Delegated);
+
+        Assert.Equal(["Mail.Read"], scopes);
+        Assert.Empty(handler.RequestUris);
+    }
+
+    private sealed class PermissionsHandler(string responseJson) : HttpMessageHandler
+    {
+        public List<Uri> RequestUris { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestUris.Add(request.RequestUri!);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+            });
+        }
+    }
 
     [Fact]
     public void GetRequestsFromBatch_PathAddressedRequest_ReturnsIdAddressedUrl()
