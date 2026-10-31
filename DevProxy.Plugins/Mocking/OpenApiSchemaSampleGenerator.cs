@@ -89,7 +89,18 @@ internal static class OpenApiSchemaSampleGenerator
         var alternative = schema.OneOf?.FirstOrDefault() ?? schema.AnyOf?.FirstOrDefault();
         if (alternative is not null)
         {
-            return GenerateSample(alternative, depth + 1, visiting);
+            var alternativeSample = GenerateSample(alternative, depth + 1, visiting);
+            // keep the properties defined next to oneOf/anyOf
+            if (schema.Properties is { Count: > 0 } && alternativeSample is null or JsonObject)
+            {
+                var obj = GenerateObjectSample(schema, depth, visiting);
+                if (alternativeSample is JsonObject alternativeObject)
+                {
+                    MergeInto(obj, alternativeObject);
+                }
+                return obj;
+            }
+            return alternativeSample;
         }
 
         return GetEffectiveType(schema) switch
@@ -107,19 +118,13 @@ internal static class OpenApiSchemaSampleGenerator
     private static JsonNode? GenerateAllOfSample(IOpenApiSchema schema, int depth, HashSet<string> visiting)
     {
         JsonObject? merged = null;
-        JsonNode? firstNonObject = null;
 
         foreach (var subSchema in schema.AllOf ?? [])
         {
-            var sample = GenerateSample(subSchema, depth + 1, visiting);
-            if (sample is JsonObject obj)
+            if (GenerateSample(subSchema, depth + 1, visiting) is JsonObject obj)
             {
                 merged ??= [];
                 MergeInto(merged, obj);
-            }
-            else if (sample is not null)
-            {
-                firstNonObject ??= sample;
             }
         }
 
@@ -129,7 +134,61 @@ internal static class OpenApiSchemaSampleGenerator
             MergeInto(merged, GenerateObjectSample(schema, depth, visiting));
         }
 
-        return merged ?? firstNonObject;
+        if (merged is not null)
+        {
+            return merged;
+        }
+
+        // for non-object values, combine the constraints of all branches
+        // so that the value satisfies all of them
+        return GenerateSample(CombineConstraints([schema, .. schema.AllOf ?? []]), depth + 1, visiting);
+    }
+
+    private static OpenApiSchema CombineConstraints(IEnumerable<IOpenApiSchema?> schemas)
+    {
+        var combined = new OpenApiSchema();
+        decimal? minimum = null, maximum = null;
+
+        foreach (var schema in schemas)
+        {
+            if (schema is null)
+            {
+                continue;
+            }
+
+#pragma warning disable CS0618
+            combined.Example ??= schema.Example?.DeepClone();
+#pragma warning restore CS0618
+            combined.Default ??= schema.Default?.DeepClone();
+            if (combined.Enum is not { Count: > 0 } && schema.Enum is { Count: > 0 })
+            {
+                combined.Enum = [.. schema.Enum];
+            }
+            combined.Type ??= schema.Type;
+            combined.Format ??= schema.Format;
+            combined.Items ??= schema.Items;
+
+            if (TryParseBound(schema.Minimum?.ToString(), out var schemaMinimum) && (minimum is null || schemaMinimum > minimum))
+            {
+                minimum = schemaMinimum;
+            }
+            if (TryParseBound(schema.Maximum?.ToString(), out var schemaMaximum) && (maximum is null || schemaMaximum < maximum))
+            {
+                maximum = schemaMaximum;
+            }
+            if (schema.MinLength is int minLength && (combined.MinLength is null || minLength > combined.MinLength))
+            {
+                combined.MinLength = minLength;
+            }
+            if (schema.MaxLength is int maxLength && (combined.MaxLength is null || maxLength < combined.MaxLength))
+            {
+                combined.MaxLength = maxLength;
+            }
+        }
+
+        combined.Minimum = minimum?.ToString(CultureInfo.InvariantCulture);
+        combined.Maximum = maximum?.ToString(CultureInfo.InvariantCulture);
+        return combined;
     }
 
     private static JsonObject GenerateObjectSample(IOpenApiSchema schema, int depth, HashSet<string> visiting)
@@ -248,6 +307,13 @@ internal static class OpenApiSchemaSampleGenerator
     {
         foreach (var (key, value) in source)
         {
+            // merge nested objects so that properties from all sources are kept
+            if (value is JsonObject sourceObject && target[key] is JsonObject targetObject)
+            {
+                MergeInto(targetObject, sourceObject);
+                continue;
+            }
+
             target[key] = value?.DeepClone();
         }
     }
@@ -348,7 +414,10 @@ internal static class OpenApiSchemaSampleGenerator
         }
         if (schema.Required is { Count: > 0 })
         {
-            description["required"] = new JsonArray([.. schema.Required.Select(r => JsonValue.Create(r))]);
+            MergeDescription(description, new JsonObject
+            {
+                ["required"] = new JsonArray([.. schema.Required.Select(r => JsonValue.Create(r))])
+            });
         }
         if (schema.Items is not null)
         {
@@ -380,6 +449,18 @@ internal static class OpenApiSchemaSampleGenerator
                 target["properties"] is JsonObject targetProperties)
             {
                 MergeInto(targetProperties, sourceProperties);
+                continue;
+            }
+            if (key == "required" && value is JsonArray sourceRequired &&
+                target["required"] is JsonArray targetRequired)
+            {
+                foreach (var name in sourceRequired.Select(r => r?.GetValue<string>()).Where(n => n is not null))
+                {
+                    if (!targetRequired.Any(r => r?.GetValue<string>() == name))
+                    {
+                        targetRequired.Add(name);
+                    }
+                }
                 continue;
             }
 
