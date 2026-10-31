@@ -61,6 +61,50 @@ public class GraphUtilsTests
             "/sites/{sites-id}/drive/items/{items-id}/content",
             GraphUtils.GetTokenizedUrl("https://graph.microsoft.com/v1.0/sites/site-id/drive/items/item-id/content"));
 
+    [Theory]
+    [InlineData(
+        "https://graph.microsoft.com/v1.0/users('48d31887-5fad-4d73-a9f5-3c356e68a038')",
+        "/users(<value>)")]
+    [InlineData(
+        "https://graph.microsoft.com/v1.0/users('john@contoso.com')/messages",
+        "/users(<value>)/messages")]
+    [InlineData(
+        "https://graph.microsoft.com/v1.0/applications(appId='46e6adf4-a9cf-4b60-9390-0ba6fb00bf6b')",
+        "/applications(appId=<value>)")]
+    [InlineData(
+        "https://graph.microsoft.com/v1.0/oauth2PermissionGrants('grant-id')",
+        "/oauth2PermissionGrants(<value>)")]
+    public void GetTokenizedUrl_KeyInParentheses_ReturnsTokenizedKey(string url, string expected) =>
+        Assert.Equal(expected, GraphUtils.GetTokenizedUrl(url));
+
+    [Theory]
+    [InlineData(
+        "https://graph.microsoft.com/v1.0/reports/getOffice365ActiveUserDetail(period='D7')",
+        "/reports/getOffice365ActiveUserDetail(period=<value>)")]
+    [InlineData(
+        "https://graph.microsoft.com/v1.0/me/calendarView/delta()",
+        "/me/calendarView/delta()")]
+    [InlineData(
+        "https://graph.microsoft.com/v1.0/me/drive/root/search(q='budget, 2024=final')",
+        "/me/drive/root/search(q=<value>)")]
+    [InlineData(
+        "https://graph.microsoft.com/v1.0/me/drive/root/search(q='O''Brien')",
+        "/me/drive/root/search(q=<value>)")]
+    [InlineData(
+        "https://graph.microsoft.com/v1.0/me/drive/items/1/getActivitiesByInterval(startDateTime='2017-01-01',endDateTime='2017-01-03',interval='day')",
+        "/me/drive/items/{items-id}/getActivitiesByInterval(startDateTime=<value>,endDateTime=<value>,interval=<value>)")]
+    [InlineData(
+        "https://graph.microsoft.com/beta/reports/microsoft.graph.getTeamsUserActivityUserDetail(date=2024-01-01)",
+        "/reports/microsoft.graph.getTeamsUserActivityUserDetail(date=<value>)")]
+    public void GetTokenizedUrl_FunctionWithParameters_ReturnsTokenizedParameters(string url, string expected) =>
+        Assert.Equal(expected, GraphUtils.GetTokenizedUrl(url));
+
+    [Fact]
+    public void GetTokenizedUrl_RepeatedSegmentValues_TokenizesEachSegmentIndependently() =>
+        Assert.Equal(
+            "/sites/root/lists/{lists-id}/items/{items-id}",
+            GraphUtils.GetTokenizedUrl("https://graph.microsoft.com/v1.0/sites/root/lists/1/items/1"));
+
     [Fact]
     public void GetRequestsFromBatch_PathAddressedRequest_ReturnsIdAddressedUrl()
     {
