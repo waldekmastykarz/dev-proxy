@@ -22,6 +22,7 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
     ISet<UrlToWatch> urlsToWatch) : BasePlugin(logger, urlsToWatch)
 {
     private static readonly TimeSpan PermissionsLookupTimeout = TimeSpan.FromSeconds(3);
+    private static readonly HashSet<string> SelfOnlyDelegatedPermissions = new(["User.Read", "User.ReadWrite"], StringComparer.OrdinalIgnoreCase);
 
 #pragma warning disable CA2213 // Disposable fields should be disposed - HttpClient is injected via DI
     private readonly HttpClient _httpClient = httpClient;
@@ -163,6 +164,26 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
                 MessageType.Warning);
         }
 
+        // delegated self-only permissions, like User.Read, are listed for
+        // /users/{id} but only grant access to the signed-in user
+        var selfOnlyNote = string.Empty;
+        if (permissionsType == GraphPermissionsType.Delegated &&
+            tokenizedUrl.StartsWith("/users/", StringComparison.OrdinalIgnoreCase))
+        {
+            var selfOnlyPermissions = requiredPermissions
+                .Where(p => SelfOnlyDelegatedPermissions.Contains(p.Value))
+                .Select(p => p.Value)
+                .ToArray();
+            var otherUserPermissions = requiredPermissions
+                .Where(p => !SelfOnlyDelegatedPermissions.Contains(p.Value))
+                .ToArray();
+            if (selfOnlyPermissions.Length > 0 && otherUserPermissions.Length > 0)
+            {
+                requiredPermissions = otherUserPermissions;
+                selfOnlyNote = $" The {FormatList(selfOnlyPermissions)} permission(s) only allow access to the signed-in user. If you're calling the API for the signed-in user, use /me instead.";
+            }
+        }
+
         var tokenPermissionsSet = new HashSet<string>(tokenPermissions, StringComparer.OrdinalIgnoreCase);
         var grantingPermissions = requiredPermissions
             .Select(p => p.Value)
@@ -179,10 +200,6 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
             .Where(p => p.IsLeastPrivilege)
             .Select(p => p.Value)
             .ToArray();
-        if (leastPrivileged.Length == 0)
-        {
-            leastPrivileged = [requiredPermissions[0].Value];
-        }
         var otherPermissions = requiredPermissions
             .Select(p => p.Value)
             .Except(leastPrivileged, StringComparer.OrdinalIgnoreCase)
@@ -194,8 +211,11 @@ public sealed class GraphMissingPermissionsGuidancePlugin(
 
         var message = $"{requestDescription} failed with 403 Forbidden because the access token doesn't have the permissions required to call {method} {tokenizedUrl}. " +
             $"{CapitalizeFirst(GetPermissionsTypeString(permissionsType.Value))} permissions on the token: {tokenPermissionsString}. " +
-            $"Add the least privileged permission: {FormatList(leastPrivileged)}." +
-            (otherPermissions.Length > 0 ? $" Alternatively, use one of the following higher-privileged permissions: {FormatList(otherPermissions)}." : string.Empty) +
+            (leastPrivileged.Length > 0
+                ? $"Add the least privileged permission: {FormatList(leastPrivileged)}." +
+                    (otherPermissions.Length > 0 ? $" Alternatively, use one of the following higher-privileged permissions: {FormatList(otherPermissions)}." : string.Empty)
+                : $"Add any of the following permissions: {FormatList(otherPermissions)}.") +
+            selfOnlyNote +
             " " + GetInstructions(permissionsType.Value);
 
         return (message, MessageType.Failed);

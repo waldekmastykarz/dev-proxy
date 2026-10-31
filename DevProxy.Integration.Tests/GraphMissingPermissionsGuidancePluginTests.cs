@@ -271,6 +271,51 @@ public sealed class GraphMissingPermissionsGuidancePluginTests
         Assert.Equal(2, handler.Requests.Count);
     }
 
+    [Fact]
+    public async Task Forbidden_DelegatedSelfOnlyPermissionForOtherUser_LogsFailed()
+    {
+        using var handler = new StubPermissionsHandler("""
+            [
+              { "value": "User.Read", "scopeType": "DelegatedWork", "isLeastPrivilege": false, "isHidden": false },
+              { "value": "User.Read.All", "scopeType": "DelegatedWork", "isLeastPrivilege": false, "isHidden": false },
+              { "value": "User.ReadBasic.All", "scopeType": "DelegatedWork", "isLeastPrivilege": true, "isHidden": false }
+            ]
+            """);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/users/8e6b0bba-5bce-4b1b-9d5b-1f5e8b0d1a6c", [("Authorization", BearerToken(scp: "User.Read"))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        Assert.Empty(factory.LogsOfType(MessageType.Warning));
+        var log = Assert.Single(factory.LogsOfType(MessageType.Failed));
+        Assert.Contains("least privileged permission: User.ReadBasic.All", log.Message, StringComparison.Ordinal);
+        Assert.Contains("higher-privileged permissions: User.Read.All.", log.Message, StringComparison.Ordinal);
+        Assert.Contains("only allow access to the signed-in user", log.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Forbidden_NoLeastPrivilegedPermissionMarked_ListsUnrankedAlternatives()
+    {
+        using var handler = new StubPermissionsHandler("""
+            [
+              { "value": "User.Read.All", "scopeType": "Application", "isLeastPrivilege": false, "isHidden": false },
+              { "value": "User.ReadBasic.All", "scopeType": "Application", "isLeastPrivilege": false, "isHidden": false }
+            ]
+            """);
+        var (plugin, factory) = CreatePlugin(handler);
+
+        var exchange = TestExchange
+            .Request("GET", "https://graph.microsoft.com/v1.0/users", [("Authorization", BearerToken(roles: ["Mail.Read"]))])
+            .WithResponse(HttpStatusCode.Forbidden);
+        await plugin.AfterResponseAsync(exchange.ResponseArgs, CancellationToken.None);
+
+        var log = Assert.Single(factory.LogsOfType(MessageType.Failed));
+        Assert.Contains("Add any of the following permissions: User.Read.All, User.ReadBasic.All.", log.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("least privileged", log.Message, StringComparison.Ordinal);
+    }
+
     private static (GraphMissingPermissionsGuidancePlugin Plugin, CapturingLoggerFactory Factory) CreatePlugin(HttpMessageHandler handler)
     {
         var factory = new CapturingLoggerFactory();
