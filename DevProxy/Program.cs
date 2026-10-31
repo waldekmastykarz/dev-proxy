@@ -92,29 +92,6 @@ static async Task<int> StartDetachedProcessAsync(string[] args)
         return 1;
     }
 
-    // Check for port conflicts with existing instances
-    var existingStates = await StateManager.LoadAllStatesAsync();
-    if (existingStates.Count > 0)
-    {
-        var earlyOptions = new DevProxyConfigOptions();
-        earlyOptions.ParseOptions(args);
-        var requestedPort = earlyOptions.Port ?? 8000;
-        var requestedApiPort = earlyOptions.ApiPort ?? 8897;
-
-        var proxyPortOwner = PortConflict.FindOwningInstance(existingStates, earlyOptions.IPAddress, requestedPort, Environment.ProcessId);
-        var apiPortOwner = PortConflict.FindOwningInstance(existingStates, earlyOptions.ApiIpAddress, requestedApiPort, Environment.ProcessId);
-        var conflictMessage = proxyPortOwner is not null
-            ? PortConflict.FormatMessage(PortKind.Proxy, requestedPort, proxyPortOwner)
-            : apiPortOwner is not null
-                ? PortConflict.FormatMessage(PortKind.Api, requestedApiPort, apiPortOwner)
-                : null;
-        if (conflictMessage is not null)
-        {
-            await Console.Error.WriteLineAsync(isJsonOutput ? FormatJsonLogEntry("error", conflictMessage) : conflictMessage);
-            return 1;
-        }
-    }
-
     // Clean up old log files
     StateManager.CleanupOldLogs();
 

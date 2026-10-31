@@ -279,6 +279,15 @@ sealed class DevProxyCommand : RootCommand
         return exitCode;
     }
 
+    internal static void ValidatePort(OptionResult input)
+    {
+        var value = input.Tokens.Count > 0 ? input.Tokens[0].Value : null;
+        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var port) || port > System.Net.IPEndPoint.MaxPort)
+        {
+            input.AddError($"'{value}' is not a valid port. Specify a number between 0 and {System.Net.IPEndPoint.MaxPort}.");
+        }
+    }
+
     private async Task<int> InvokeAsync(ParseResult parseResult, CancellationToken cancellationToken)
     {
         if (_app is null)
@@ -456,12 +465,14 @@ sealed class DevProxyCommand : RootCommand
             Description = "The port for the proxy to listen on",
             HelpName = "port"
         };
+        portOption.Validators.Add(ValidatePort);
 
         var apiPortOption = new Option<int?>(ApiPortOptionName)
         {
             Description = "The port for the Dev Proxy API to listen on",
             HelpName = "api-port"
         };
+        apiPortOption.Validators.Add(ValidatePort);
         var apiIpAddressOption = new Option<string?>(ApiIpAddressOptionName)
         {
             Description = "The API bind address (default: 127.0.0.1). Use ::1 for IPv6 loopback. Non-loopback binding requires a trusted network",

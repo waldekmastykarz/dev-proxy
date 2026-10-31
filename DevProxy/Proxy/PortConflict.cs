@@ -28,7 +28,7 @@ internal static class PortConflict
     /// </summary>
     public static bool IsPortAvailable(string? ipAddress, int port)
     {
-        if (port <= 0)
+        if (port <= 0 || port > IPEndPoint.MaxPort)
         {
             return true;
         }
@@ -144,11 +144,13 @@ internal static class PortConflict
             return false;
         }
 
-        return address.Equals(requestedAddress) || IsWildcard(address) || IsWildcard(requestedAddress);
+        return address.Equals(requestedAddress) || Covers(address, requestedAddress) || Covers(requestedAddress, address);
     }
 
-    private static bool IsWildcard(IPAddress address) =>
-        address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any);
+    // An IPv6 wildcard listener is dual-stack, but an IPv4 wildcard only covers IPv4 addresses.
+    private static bool Covers(IPAddress wildcard, IPAddress address) =>
+        wildcard.Equals(IPAddress.IPv6Any) ||
+        (wildcard.Equals(IPAddress.Any) && address.AddressFamily == AddressFamily.InterNetwork);
 
     private static bool TryParseAddress(string? ipAddress, out IPAddress address)
     {

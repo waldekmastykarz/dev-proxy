@@ -2,9 +2,11 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using DevProxy.Commands;
 using DevProxy.Proxy;
 using DevProxy.State;
 using Microsoft.AspNetCore.Connections;
+using System.CommandLine;
 using System.Net;
 using System.Net.Sockets;
 using Xunit;
@@ -38,6 +40,7 @@ public class PortConflictTests
 
     [Theory]
     [InlineData("127.0.0.1", 0)]
+    [InlineData("127.0.0.1", 65536)]
     [InlineData("not-an-ip", 8000)]
     public void IsPortAvailable_LeavesUncheckableInputToKestrel(string ipAddress, int port)
     {
@@ -91,6 +94,10 @@ public class PortConflictTests
     [InlineData("http://[::1]:8000", "127.0.0.1", false)]
     [InlineData("http://localhost:8000", "127.0.0.1", false)]
     [InlineData("http://127.0.0.1:8000", "not-an-ip", false)]
+    [InlineData("http://0.0.0.0:8000", "[::1]", false)]
+    [InlineData("http://[::1]:8000", "0.0.0.0", false)]
+    [InlineData("http://[::]:8000", "127.0.0.1", true)]
+    [InlineData("http://127.0.0.1:8000", "::", true)]
     public void FindOwningInstance_RequiresOverlappingAddress(string proxyUrl, string requestedAddress, bool expectedMatch)
     {
         var states = new[] { State(2, proxyUrl, 8000, "http://127.0.0.1:8897") };
@@ -137,5 +144,23 @@ public class PortConflictTests
 
         Assert.True(PortConflict.IsAddressInUse(ex));
         Assert.False(PortConflict.IsAddressInUse(new IOException("other")));
+    }
+
+    [Theory]
+    [InlineData("0", true)]
+    [InlineData("8000", true)]
+    [InlineData("65535", true)]
+    [InlineData("65536", false)]
+    [InlineData("-1", false)]
+    [InlineData("abc", false)]
+    public void PortOptions_ValidateRange(string value, bool valid)
+    {
+        var option = new Option<int?>(DevProxyCommand.PortOptionName);
+        option.Validators.Add(DevProxyCommand.ValidatePort);
+        var command = new RootCommand { option };
+
+        var result = command.Parse([DevProxyCommand.PortOptionName, value]);
+
+        Assert.Equal(valid, result.Errors.Count == 0);
     }
 }
