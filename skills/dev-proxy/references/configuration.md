@@ -48,7 +48,7 @@ A configuration file follows a specific property order: `$schema`, then `plugins
 
 ## Environment Variable Placeholders
 
-Reference environment variables in config files and plugin data files (mocks, CRUD API definitions and data, error responses, OpenAPI specs used by MinimalPermissions plugins, and so on) with `${VAR_NAME}`. `${env:VAR_NAME}` works too. Dev Proxy resolves placeholders when it loads the file.
+Reference environment variables in config files and plugin data files (mocks, CRUD API definitions and data, error responses, OpenAPI specs used by MinimalPermissions plugins, and so on) with `${VAR_NAME}`. `${env:VAR_NAME}` works too and also accepts names with characters like `(`, `-`, or `.`, for example `${env:ProgramFiles(x86)}`. Dev Proxy resolves placeholders when it loads the file.
 
 ```json
 {
@@ -65,7 +65,7 @@ Reference environment variables in config files and plugin data files (mocks, CR
 - Use `$${VAR_NAME}` for a literal `${VAR_NAME}`.
 - Placeholders resolve in string values only (not property names). Config values like ports can use a string placeholder (`"port": "${PORT}"`); data files need the value's expected type.
 - `${...}` placeholders resolve once at load; `@`-tokens such as `@dynamic` and `@request.body.*` resolve per request.
-- Exception: RewritePlugin rewrites files don't resolve placeholders at load because `${name}` in `out.url` refers to regex capture groups. Use `${env:VAR_NAME}`, which RewritePlugin resolves per request.
+- Exception: RewritePlugin rewrite rules (in rewrites files or inline in the plugin config section) don't resolve placeholders at load because `${name}` in `out.url` refers to regex capture groups. Use `${env:VAR_NAME}`, which RewritePlugin resolves per request.
 - Deprecated: `@VAR_NAME` in Azure API Center plugin settings and `{VAR_NAME}` in OpenAPI specs used by MinimalPermissions plugins still work but log a warning. Use `${VAR_NAME}` instead.
 
 ## Plugin Architecture

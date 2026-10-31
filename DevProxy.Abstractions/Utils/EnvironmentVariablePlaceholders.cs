@@ -307,6 +307,8 @@ public static partial class EnvironmentVariablePlaceholders
         }
     }
 
-    [GeneratedRegex(@"(?<escape>\$)?\$\{(?:env:)?(?<name>[A-Za-z_][A-Za-z0-9_]*)\}")]
+    // ${env:NAME} accepts any characters except } so that names like ProgramFiles(x86) work;
+    // bare ${NAME} is limited to identifiers to avoid matching unrelated ${...} text
+    [GeneratedRegex(@"(?<escape>\$)?\$\{(?:env:(?<name>[^}]+)|(?<name>[A-Za-z_][A-Za-z0-9_]*))\}")]
     private static partial Regex PlaceholderRegex();
 }

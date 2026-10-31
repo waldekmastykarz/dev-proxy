@@ -143,4 +143,69 @@ public class EnvironmentVariablePlaceholdersTests
 
         Assert.Equal("legacy ${TENANT_ID} {TENANT_ID} ${MISSING}", result);
     }
+
+    [Theory]
+    [InlineData("${env:ProgramFiles(x86)}", @"C:\Program Files (x86)")]
+    [InlineData("${env:FOO-BAR}", "dash")]
+    [InlineData("${env:FOO.BAR}", "dot")]
+    [InlineData("$${env:ProgramFiles(x86)}", "${env:ProgramFiles(x86)}")]
+    [InlineData("${ProgramFiles(x86)}", "${ProgramFiles(x86)}")]
+    [InlineData("${FOO-BAR}", "${FOO-BAR}")]
+    public void Resolve_EnvPrefixAcceptsAnyNameCharactersExceptBrace(string input, string expected)
+    {
+        var variables = new Dictionary<string, string>
+        {
+            ["ProgramFiles(x86)"] = @"C:\Program Files (x86)",
+            ["FOO-BAR"] = "dash",
+            ["FOO.BAR"] = "dot"
+        };
+        var unresolved = new List<string>();
+
+        var result = EnvironmentVariablePlaceholders.Resolve(input, n => variables.TryGetValue(n, out var v) ? v : null, unresolved);
+
+        Assert.Equal(expected, result);
+        Assert.Empty(unresolved);
+    }
+
+    [Fact]
+    public void Resolve_ReportsUnsetEnvPrefixedNameWithSpecialCharacters()
+    {
+        var unresolved = new List<string>();
+
+        var result = EnvironmentVariablePlaceholders.Resolve("${env:MISSING(x86)}", Lookup, unresolved);
+
+        Assert.Equal("${env:MISSING(x86)}", result);
+        Assert.Equal(["MISSING(x86)"], unresolved);
+    }
+
+    [Fact]
+    public void Resolve_TransformsTextAroundEnvPrefixedNamesWithSpecialCharacters()
+    {
+        var result = EnvironmentVariablePlaceholders.Resolve(
+            "{TENANT_ID} ${env:FOO-BAR} $${env:FOO-BAR}",
+            name => name == "FOO-BAR" ? "{TENANT_ID}" : null,
+            null,
+            text => text.Replace("{TENANT_ID}", "legacy", StringComparison.Ordinal));
+
+        Assert.Equal("legacy {TENANT_ID} ${env:FOO-BAR}", result);
+    }
+
+    [Fact]
+    public void ResolveInYaml_AliasUsedAsKey_IsResolvedWithItsAnchor()
+    {
+        // intentional: aliases share the anchored node, so a key that aliases a
+        // resolved value changes with it
+        var yaml = """
+        base: &id ${TENANT_ID}
+        *id : value
+        """;
+
+        var result = EnvironmentVariablePlaceholders.ResolveInYaml(yaml, Lookup);
+
+        var stream = new YamlDotNet.RepresentationModel.YamlStream();
+        stream.Load(new StringReader(result));
+        var root = (YamlDotNet.RepresentationModel.YamlMappingNode)stream.Documents[0].RootNode;
+        Assert.Equal("contoso", root["base"].ToString());
+        Assert.Equal("value", root["contoso"].ToString());
+    }
 }
