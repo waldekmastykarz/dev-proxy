@@ -16,10 +16,10 @@ internal sealed record LinuxTrustStore(
     IReadOnlyList<string> UpdateArguments,
     IReadOnlyList<string> RemoveUpdateArguments)
 {
-    public string CertificatePath => Path.Combine(AnchorDirectory, LinuxCertificateHelper.CertificateFileName);
+    public string CertificatePath => $"{AnchorDirectory}/{LinuxCertificateHelper.CertificateFileName}";
 
     /// <summary>Anchor that earlier manual setup instructions told users to create.</summary>
-    public string LegacyCertificatePath => Path.Combine(AnchorDirectory, LinuxCertificateHelper.LegacyCertificateFileName);
+    public string LegacyCertificatePath => $"{AnchorDirectory}/{LinuxCertificateHelper.LegacyCertificateFileName}";
 }
 
 /// <summary>A process invocation (file name + argument list, no shell).</summary>
@@ -80,14 +80,24 @@ internal static class LinuxCertificateHelper
     }
 
     /// <summary>
-    /// Wraps a command that needs root. Runs it directly when already root; otherwise via
-    /// sudo, with <c>-n</c> when there's no terminal to prompt on so it fails instead of hanging.
+    /// Wraps a command that needs root. When already root, runs it directly, resolving bare
+    /// names from system directories only (PATH could point to user-writable directories);
+    /// returns null if it can't be resolved. Otherwise runs it via sudo, with <c>-n</c> when
+    /// there's no terminal to prompt on so it fails instead of hanging.
     /// </summary>
-    internal static LinuxCommand Elevate(LinuxCommand command, bool isRoot, bool isInteractive)
+    internal static LinuxCommand? Elevate(LinuxCommand command, bool isRoot, bool isInteractive) =>
+        Elevate(command, isRoot, isInteractive, FindSystemExecutable);
+
+    internal static LinuxCommand? Elevate(LinuxCommand command, bool isRoot, bool isInteractive, Func<string, string?> findSystemExecutable)
     {
         if (isRoot)
         {
-            return command;
+            if (command.FileName.StartsWith('/'))
+            {
+                return command;
+            }
+            var resolved = findSystemExecutable(command.FileName);
+            return resolved is null ? null : command with { FileName = resolved };
         }
 
         List<string> args = isInteractive ? [] : ["-n"];
@@ -182,7 +192,7 @@ internal static class LinuxCertificateHelper
             var removeLegacy = FileContainsCertificate(store.LegacyCertificatePath, certificate);
             foreach (var command in GetTrustCommands(store, pemFilePath, removeLegacy))
             {
-                if (!Run(Elevate(command, isRoot, isInteractive), logger, redirectOutput: false))
+                if (!RunElevated(command, isRoot, isInteractive, logger))
                 {
                     if (!isRoot && !isInteractive)
                     {
@@ -224,7 +234,7 @@ internal static class LinuxCertificateHelper
             var removed = true;
             foreach (var command in GetUntrustCommands(store, removeLegacy))
             {
-                if (!Run(Elevate(command, isRoot, isInteractive), logger, redirectOutput: false))
+                if (!RunElevated(command, isRoot, isInteractive, logger))
                 {
                     removed = false;
                     break;
@@ -241,7 +251,7 @@ internal static class LinuxCertificateHelper
 
     private static void TrustInNssDatabase(string pemFilePath, ILogger logger)
     {
-        var certutil = FindExecutable("certutil");
+        var certutil = FindCertutil();
         if (certutil is null)
         {
             logger.LogInformation(
@@ -270,7 +280,7 @@ internal static class LinuxCertificateHelper
 
     private static void RemoveFromNssDatabase(ILogger logger)
     {
-        var certutil = FindExecutable("certutil");
+        var certutil = FindCertutil();
         var nssDir = GetNssDatabaseDirectory();
         if (certutil is null || !Directory.Exists(nssDir))
         {
@@ -292,6 +302,21 @@ internal static class LinuxCertificateHelper
     private static (bool IsRoot, bool IsInteractive) GetContext() =>
         (Environment.UserName == "root",
          !Console.IsInputRedirected && Environment.GetEnvironmentVariable("CI") is null);
+
+    private static bool RunElevated(LinuxCommand command, bool isRoot, bool isInteractive, ILogger logger)
+    {
+        var elevated = Elevate(command, isRoot, isInteractive);
+        if (elevated is null)
+        {
+            logger.LogError("Couldn't find {Command} in {Directories}.", command.FileName, string.Join(", ", _systemDirectories));
+            return false;
+        }
+        return Run(elevated, logger, redirectOutput: false);
+    }
+
+    // When running as root, don't pick up certutil from PATH, which might be user-writable.
+    private static string? FindCertutil() =>
+        GetContext().IsRoot ? FindSystemExecutable("certutil") : FindExecutable("certutil");
 
     internal static string? FindSystemExecutable(string name) =>
         _systemDirectories.Select(d => Path.Combine(d, name)).FirstOrDefault(File.Exists);

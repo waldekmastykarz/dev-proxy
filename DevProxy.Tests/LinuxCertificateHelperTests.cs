@@ -80,20 +80,40 @@ public class LinuxCertificateHelperTests
     }
 
     [Fact]
-    public void Elevate_Root_RunsDirectly()
+    public void Elevate_Root_RunsAbsoluteCommandDirectly()
     {
-        var command = new LinuxCommand("update-ca-certificates", []);
+        var command = new LinuxCommand("/usr/sbin/update-ca-certificates", []);
 
-        var elevated = LinuxCertificateHelper.Elevate(command, isRoot: true, isInteractive: false);
+        var elevated = LinuxCertificateHelper.Elevate(command, isRoot: true, isInteractive: false, _ => null);
 
         Assert.Same(command, elevated);
+    }
+
+    [Fact]
+    public void Elevate_Root_ResolvesBareCommandFromSystemDirectories()
+    {
+        var elevated = LinuxCertificateHelper.Elevate(
+            new("rm", ["-f", "x"]), isRoot: true, isInteractive: false, name => $"/usr/bin/{name}");
+
+        Assert.NotNull(elevated);
+        Assert.Equal("/usr/bin/rm", elevated.FileName);
+        Assert.Equal(["-f", "x"], elevated.Arguments);
+    }
+
+    [Fact]
+    public void Elevate_Root_UnresolvedBareCommand_ReturnsNull()
+    {
+        var elevated = LinuxCertificateHelper.Elevate(
+            new("install", []), isRoot: true, isInteractive: false, _ => null);
+
+        Assert.Null(elevated);
     }
 
     [Fact]
     public void Elevate_Interactive_UsesSudo()
     {
         var elevated = LinuxCertificateHelper.Elevate(
-            new("install", ["-m", "0644", "a", "b"]), isRoot: false, isInteractive: true);
+            new("install", ["-m", "0644", "a", "b"]), isRoot: false, isInteractive: true)!;
 
         Assert.Equal("sudo", elevated.FileName);
         Assert.Equal(["--", "install", "-m", "0644", "a", "b"], elevated.Arguments);
@@ -103,7 +123,7 @@ public class LinuxCertificateHelperTests
     public void Elevate_NonInteractive_UsesSudoWithoutPrompt()
     {
         var elevated = LinuxCertificateHelper.Elevate(
-            new("rm", ["-f", "x"]), isRoot: false, isInteractive: false);
+            new("rm", ["-f", "x"]), isRoot: false, isInteractive: false)!;
 
         Assert.Equal("sudo", elevated.FileName);
         Assert.Equal(["-n", "--", "rm", "-f", "x"], elevated.Arguments);
