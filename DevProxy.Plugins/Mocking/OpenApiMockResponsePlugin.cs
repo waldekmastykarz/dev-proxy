@@ -47,10 +47,11 @@ public sealed class OpenApiMockResponsePlugin(
     private readonly HttpClient _httpClient = httpClient;
 #pragma warning restore CA2213
     private readonly ILanguageModelClient _languageModelClient = languageModelClient;
-    // generated response bodies cached per operation (method + path template)
-    private readonly ConcurrentDictionary<string, Lazy<Task<string?>>> _responseCache = new(StringComparer.OrdinalIgnoreCase);
 
-    private volatile OpenApiDocument? _document;
+    // the spec and the response bodies generated from it, cached per operation
+    // (method + path template), are published together, so that requests
+    // handled during a reload can't add stale bodies to the new cache
+    private volatile SpecSnapshot? _snapshot;
     private OpenApiMockResponseSpecLoader? _loader;
 
     public override string Name => nameof(OpenApiMockResponsePlugin);
@@ -95,15 +96,15 @@ public sealed class OpenApiMockResponsePlugin(
             return;
         }
 
-        var document = _document;
-        if (document is null)
+        var snapshot = _snapshot;
+        if (snapshot is null)
         {
             Logger.LogRequest("OpenAPI spec not loaded", MessageType.Skipped, new LoggingContext(e.ProxySession));
             return;
         }
 
         var request = e.ProxySession.Request;
-        var pathItem = document.FindMatchingPathItem(request.RequestUri.AbsoluteUri, Logger);
+        var pathItem = snapshot.Document.FindMatchingPathItem(request.RequestUri.AbsoluteUri, Logger);
         if (pathItem is null)
         {
             Logger.LogRequest("No matching path in the OpenAPI spec", MessageType.Skipped, new LoggingContext(e.ProxySession));
@@ -125,10 +126,20 @@ public sealed class OpenApiMockResponsePlugin(
         if (mediaType is not null && statusCode != HttpStatusCode.NoContent)
         {
             var cacheKey = $"{method.Method} {pathTemplate}";
-            var lazyBody = _responseCache.GetOrAdd(cacheKey, _ => new(() =>
+            var lazyBody = snapshot.ResponseCache.GetOrAdd(cacheKey, _ => new(() =>
                 // don't tie the cached generation to a single request's lifetime
                 GenerateBodyAsync(method.Method, pathTemplate, operation, contentType!, mediaType, CancellationToken.None)));
-            body = await lazyBody.Value;
+            try
+            {
+                body = await lazyBody.Value;
+            }
+            catch (Exception ex)
+            {
+                // don't cache failures so that the next request retries
+                _ = snapshot.ResponseCache.TryRemove(new(cacheKey, lazyBody));
+                Logger.LogError(ex, "Failed to generate response for {Method} {Path}", method.Method, pathTemplate);
+                return;
+            }
         }
 
         var headers = new List<MockResponseHeader>();
@@ -193,9 +204,9 @@ public sealed class OpenApiMockResponsePlugin(
                 Logger.LogWarning("OpenAPI spec {SpecFile} doesn't define any servers. Requests can't be matched to its operations", Configuration.SpecFile);
             }
 
-            _document = document;
+            PrioritizeConcretePaths(document);
             // the spec changed, so previously generated responses might be invalid
-            _responseCache.Clear();
+            _snapshot = new(document, new(StringComparer.Ordinal));
 
             Logger.LogInformation("Loaded OpenAPI spec {SpecFile} with {PathCount} paths", Configuration.SpecFile, document.Paths?.Count ?? 0);
         }
@@ -203,6 +214,23 @@ public sealed class OpenApiMockResponsePlugin(
         {
             Logger.LogError(ex, "Failed to load OpenAPI spec {SpecFile}", Configuration.SpecFile);
         }
+    }
+
+    // FindMatchingPathItem returns the first matching path, so put concrete
+    // paths, eg. /users/me, before templated ones, eg. /users/{id}
+    private static void PrioritizeConcretePaths(OpenApiDocument document)
+    {
+        if (document.Paths is null || document.Paths.Count == 0)
+        {
+            return;
+        }
+
+        var orderedPaths = new OpenApiPaths();
+        foreach (var (path, pathItem) in document.Paths.OrderBy(p => p.Key.Count(c => c == '{')))
+        {
+            orderedPaths.Add(path, pathItem);
+        }
+        document.Paths = orderedPaths;
     }
 
     private static (HttpStatusCode StatusCode, IOpenApiResponse? Response) GetMockResponse(OpenApiOperation operation)
@@ -277,7 +305,12 @@ public sealed class OpenApiMockResponsePlugin(
 
         Logger.LogDebug("Generating response for {Method} {Path} from schema", method, pathTemplate);
         var sample = OpenApiSchemaSampleGenerator.GenerateSample(mediaType.Schema);
-        return sample is null ? null : Serialize(sample, isJson);
+        if (sample is null)
+        {
+            // schema allows only null, which is a valid JSON body
+            return isJson ? "null" : null;
+        }
+        return Serialize(sample, isJson);
     }
 
     private static JsonNode? GetExample(IOpenApiMediaType mediaType)
@@ -341,6 +374,14 @@ public sealed class OpenApiMockResponsePlugin(
 
     private static JsonNode? NormalizeToExpectedType(JsonNode? json, string? expectedType)
     {
+        // small models often wrap scalar values in an object, eg. { "count": 42 }
+        if (expectedType is "string" or "number" or "integer" or "boolean" &&
+            json is JsonObject { Count: 1 } wrapper &&
+            wrapper.First().Value is JsonValue wrappedValue)
+        {
+            json = wrappedValue.DeepClone();
+        }
+
         switch (expectedType)
         {
             case "array" when json is JsonObject obj:
@@ -355,10 +396,19 @@ public sealed class OpenApiMockResponsePlugin(
             case "array" when json is not JsonArray:
             case "object" when json is not JsonObject:
                 return null;
+            case "string" when GetValueKind(json) != JsonValueKind.String:
+            case "number" when GetValueKind(json) != JsonValueKind.Number:
+            case "integer" when GetValueKind(json) != JsonValueKind.Number ||
+                !json!.AsValue().TryGetValue<decimal>(out var integer) || integer != decimal.Truncate(integer):
+            case "boolean" when GetValueKind(json) is not (JsonValueKind.True or JsonValueKind.False):
+                return null;
             default:
                 return json;
         }
     }
+
+    private static JsonValueKind? GetValueKind(JsonNode? json) =>
+        json is JsonValue value ? value.GetValueKind() : null;
 
     private static JsonNode? ExtractJson(string? response)
     {
@@ -367,6 +417,22 @@ public sealed class OpenApiMockResponsePlugin(
             return null;
         }
 
+        // the response might be a complete JSON value, including scalars,
+        // optionally wrapped in Markdown code fences
+        var trimmed = response.Trim();
+        if (trimmed.StartsWith("```", StringComparison.Ordinal) && trimmed.EndsWith("```", StringComparison.Ordinal) && trimmed.Length > 6)
+        {
+            var firstLineEnd = trimmed.IndexOf('\n', StringComparison.Ordinal);
+            trimmed = firstLineEnd < 0 ?
+                trimmed[3..^3].Trim() :
+                trimmed[(firstLineEnd + 1)..^3].Trim();
+        }
+        if (TryParseJson(trimmed, out var json))
+        {
+            return json;
+        }
+
+        // or JSON wrapped in other text, like markdown code fences
         var start = response.IndexOfAny(['{', '[']);
         var end = response.LastIndexOfAny(['}', ']']);
         if (start < 0 || end <= start)
@@ -374,15 +440,26 @@ public sealed class OpenApiMockResponsePlugin(
             return null;
         }
 
+        return TryParseJson(response[start..(end + 1)], out json) ? json : null;
+    }
+
+    private static bool TryParseJson(string value, out JsonNode? json)
+    {
         try
         {
-            return JsonNode.Parse(response[start..(end + 1)]);
+            json = JsonNode.Parse(value);
+            return json is not null;
         }
         catch (JsonException)
         {
-            return null;
+            json = null;
+            return false;
         }
     }
+
+    private sealed record SpecSnapshot(
+        OpenApiDocument Document,
+        ConcurrentDictionary<string, Lazy<Task<string?>>> ResponseCache);
 
     protected override void Dispose(bool disposing)
     {

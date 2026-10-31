@@ -96,8 +96,8 @@ internal static class OpenApiSchemaSampleGenerator
         {
             JsonSchemaType.Object => GenerateObjectSample(schema, depth, visiting),
             JsonSchemaType.Array => GenerateArraySample(schema, depth, visiting),
-            JsonSchemaType.Integer => JsonValue.Create(GetNumber(schema, 0)),
-            JsonSchemaType.Number => JsonValue.Create(GetNumber(schema, 0.0m)),
+            JsonSchemaType.Integer => JsonValue.Create(GetNumber(schema, isInteger: true)),
+            JsonSchemaType.Number => JsonValue.Create(GetNumber(schema, isInteger: false)),
             JsonSchemaType.Boolean => JsonValue.Create(true),
             JsonSchemaType.Null => null,
             _ => JsonValue.Create(GetStringSample(schema))
@@ -190,16 +190,23 @@ internal static class OpenApiSchemaSampleGenerator
         return value;
     }
 
-    private static T GetNumber<T>(IOpenApiSchema schema, T fallback) where T : struct
+    private static decimal GetNumber(IOpenApiSchema schema, bool isInteger)
     {
-        if (schema.Minimum is not null &&
-            decimal.TryParse(schema.Minimum.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var minimum))
+        // use 0 unless it's outside the allowed range
+        if (TryParseBound(schema.Minimum?.ToString(), out var minimum) && minimum > 0)
         {
-            return (T)Convert.ChangeType(minimum, typeof(T), CultureInfo.InvariantCulture);
+            return isInteger ? decimal.Ceiling(minimum) : minimum;
+        }
+        if (TryParseBound(schema.Maximum?.ToString(), out var maximum) && maximum < 0)
+        {
+            return isInteger ? decimal.Floor(maximum) : maximum;
         }
 
-        return fallback;
+        return 0;
     }
+
+    private static bool TryParseBound(string? bound, out decimal value) =>
+        decimal.TryParse(bound, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
 
     private static JsonSchemaType? GetEffectiveType(IOpenApiSchema schema)
     {
