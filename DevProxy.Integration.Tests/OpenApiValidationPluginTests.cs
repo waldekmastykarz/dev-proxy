@@ -406,4 +406,161 @@ public sealed class OpenApiValidationPluginTests : IDisposable
     {
         _ = await Assert.ThrowsAsync<InvalidOperationException>(() => CreatePluginAsync("{}"));
     }
+
+    private async Task<OpenApiValidationPlugin> CreatePluginWithSpecsAsync(params (string Name, string Content)[] specs)
+    {
+        foreach (var (name, content) in specs)
+        {
+            await File.WriteAllTextAsync(Path.Combine(_dir.FullName, name), content);
+        }
+        var files = string.Join(", ", specs.Select(s => $"\"{s.Name}\""));
+        return await CreatePluginAsync($$"""{ "specFiles": [ {{files}} ] }""");
+    }
+
+    private static TestExchange Call(string method, string url, IEnumerable<(string, string)>? requestHeaders = null) =>
+        TestExchange.Request(method, url, headers: requestHeaders).WithResponse(HttpStatusCode.NoContent);
+
+    [Fact]
+    public async Task FindsMethodAcrossSpecsSharingServerAndPath()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(
+            ("read.yaml", """
+            openapi: 3.0.3
+            info: { title: Read, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /users:
+                get:
+                  responses: { '204': { description: ok } }
+            """),
+            ("write.yaml", """
+            openapi: 3.0.3
+            info: { title: Write, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /users:
+                post:
+                  responses: { '204': { description: ok } }
+            """));
+
+        var post = plugin.Validate(Call("POST", "https://api.fabrikam.com/users").Session);
+        var delete = plugin.Validate(Call("DELETE", "https://api.fabrikam.com/users").Session);
+
+        Assert.Equal("POST /users", post?.Operation);
+        Assert.EndsWith("write.yaml", post!.SpecFile, StringComparison.Ordinal);
+        Assert.Empty(post.Issues);
+        Assert.Contains("Method DELETE isn't documented", Assert.Single(Messages(delete)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MatchesPathAndOperationLevelServers()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("servers.yaml", """
+            openapi: 3.0.3
+            info: { title: Servers, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /users:
+                get:
+                  responses: { '204': { description: ok } }
+                post:
+                  servers:
+                    - url: https://write.fabrikam.com
+                  responses: { '204': { description: ok } }
+              /files:
+                servers:
+                  - url: https://files.fabrikam.com
+                get:
+                  responses: { '204': { description: ok } }
+            """));
+
+        Assert.Empty(plugin.Validate(Call("GET", "https://api.fabrikam.com/users").Session)!.Issues);
+        Assert.Empty(plugin.Validate(Call("POST", "https://write.fabrikam.com/users").Session)!.Issues);
+        Assert.Empty(plugin.Validate(Call("GET", "https://files.fabrikam.com/files").Session)!.Issues);
+        Assert.Contains("Method POST isn't documented", Assert.Single(Messages(plugin.Validate(Call("POST", "https://api.fabrikam.com/users").Session))), StringComparison.Ordinal);
+        Assert.Contains("Path '/files' isn't documented", Assert.Single(Messages(plugin.Validate(Call("GET", "https://api.fabrikam.com/files").Session))), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MatchesPathsCaseSensitivelyAndStrictlyOnTrailingSlash()
+    {
+        var plugin = await CreatePluginAsync();
+
+        Assert.Null(plugin.Validate(Get("https://API.contoso.com/V1/users/me", HttpStatusCode.OK, "{}").Session));
+        Assert.Equal("GET /users/me", plugin.Validate(Get("https://API.contoso.com/v1/users/me", HttpStatusCode.OK, """{ "id": 1, "name": "Alex" }""").Session)?.Operation);
+        Assert.Contains("Path '/Users/me' isn't documented", Assert.Single(Messages(plugin.Validate(Get("https://api.contoso.com/v1/Users/me", HttpStatusCode.OK, "{}").Session))), StringComparison.Ordinal);
+        Assert.Contains("Path '/users/me/' isn't documented", Assert.Single(Messages(plugin.Validate(Get("https://api.contoso.com/v1/users/me/", HttpStatusCode.OK, "{}").Session))), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DecodesParametersAccordingToStyleAndExplode()
+    {
+        var plugin = await CreatePluginWithSpecsAsync(("styles.yaml", """
+            openapi: 3.0.3
+            info: { title: Styles, version: '1.0' }
+            servers:
+              - url: https://api.fabrikam.com
+            paths:
+              /items/{ids}:
+                get:
+                  parameters:
+                    - { name: ids, in: path, required: true, style: label, schema: { type: array, items: { type: integer } } }
+                    - { name: form, in: query, schema: { type: array, items: { type: integer } } }
+                    - { name: csv, in: query, explode: false, schema: { type: array, items: { type: integer } } }
+                    - { name: pipes, in: query, style: pipeDelimited, explode: false, schema: { type: array, items: { type: integer } } }
+                    - { name: x-ids, in: header, schema: { type: array, items: { type: integer } } }
+                    - { name: filter, in: query, required: true, style: deepObject, schema: { type: object } }
+                    - { name: score, in: query, schema: { type: number } }
+                  responses: { '204': { description: ok } }
+            """));
+
+        var valid = plugin.Validate(Call("GET",
+            "https://api.fabrikam.com/items/.1,2?form=1&form=2&csv=1,2&pipes=1%7C2&filter[name]=Alex&score=1.5",
+            [("x-ids", "1, 2")]).Session);
+        var invalid = plugin.Validate(Call("GET",
+            "https://api.fabrikam.com/items/.1,2?form=1,2&filter[name]=Alex&score=NaN").Session);
+
+        Assert.Empty(valid!.Issues);
+        var messages = Messages(invalid);
+        Assert.Contains(messages, m => m.StartsWith("form[0]:", StringComparison.Ordinal) && m.Contains("Expected integer", StringComparison.Ordinal));
+        Assert.Contains(messages, m => m.StartsWith("score:", StringComparison.Ordinal) && m.Contains("Expected number", StringComparison.Ordinal));
+        Assert.Equal(2, messages.Length);
+    }
+
+    [Fact]
+    public async Task ReportsSchemasExceedingMaxDepth()
+    {
+        var schemas = string.Join(",\n", Enumerable.Range(0, 70).Select(i =>
+            $$"""      "S{{i}}": { "allOf": [ { "$ref": "#/components/schemas/S{{i + 1}}" } ] }"""));
+        var plugin = await CreatePluginWithSpecsAsync(("deep.json", $$"""
+            {
+              "openapi": "3.0.3",
+              "info": { "title": "Deep", "version": "1.0" },
+              "servers": [ { "url": "https://api.fabrikam.com" } ],
+              "paths": {
+                "/deep": {
+                  "get": {
+                    "responses": {
+                      "200": { "description": "ok", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/S0" } } } }
+                    }
+                  }
+                }
+              },
+              "components": {
+                "schemas": {
+            {{schemas}},
+                  "S70": { "type": "string" }
+                }
+              }
+            }
+            """));
+
+        var result = plugin.Validate(TestExchange.Request("GET", "https://api.fabrikam.com/deep")
+            .WithResponse(HttpStatusCode.OK, headers: [("Content-Type", "application/json")], body: "1").Session);
+
+        Assert.Contains(Messages(result), m => m.Contains("supported maximum", StringComparison.Ordinal));
+    }
 }

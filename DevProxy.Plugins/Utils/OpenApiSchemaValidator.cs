@@ -49,28 +49,75 @@ internal static class OpenApiSchemaValidator
     }
 
     /// <summary>
-    /// Converts a raw (string) parameter value into a JSON value, coercing it
-    /// to the primitive type declared by the schema when possible, so that it
+    /// Converts raw (string) parameter values into a JSON value, decoding them
+    /// according to the parameter's serialization style and coercing them
+    /// to the primitive type declared by the schema when possible, so that they
     /// can be validated with <see cref="Validate(JsonNode?, IOpenApiSchema?, SchemaValidationDirection, string)"/>.
     /// </summary>
-    public static JsonNode? CoerceParameterValue(IReadOnlyList<string> values, IOpenApiSchema? schema)
+    public static JsonNode? CoerceParameterValue(
+        IReadOnlyList<string> values,
+        IOpenApiSchema? schema,
+        string name,
+        ParameterStyle style,
+        bool explode)
     {
         var type = schema?.Type;
         if (type is not null && type.Value.HasFlag(JsonSchemaType.Array))
         {
-            var items = values.Count == 1
-                ? values[0].Split(',')
-                : [.. values];
             var array = new JsonArray();
-            foreach (var item in items)
+            foreach (var item in SplitArrayValues(values, name, style, explode))
             {
                 array.Add(CoercePrimitive(item, schema!.Items));
             }
             return array;
         }
 
-        return CoercePrimitive(values.Count > 0 ? values[0] : string.Empty, schema);
+        var value = values.Count > 0 ? values[0] : string.Empty;
+        return CoercePrimitive(StripStylePrefix(value, name, style), schema);
     }
+
+    private static IEnumerable<string> SplitArrayValues(IReadOnlyList<string> values, string name, ParameterStyle style, bool explode)
+    {
+        switch (style)
+        {
+            case ParameterStyle.Form:
+            case ParameterStyle.SpaceDelimited:
+            case ParameterStyle.PipeDelimited:
+                // exploded arrays are sent as repeated parameters, e.g. ids=1&ids=2
+                if (explode)
+                {
+                    return values;
+                }
+                var delimiter = style switch
+                {
+                    ParameterStyle.SpaceDelimited => ' ',
+                    ParameterStyle.PipeDelimited => '|',
+                    _ => ','
+                };
+                return values.SelectMany(v => v.Split(delimiter));
+            case ParameterStyle.Label:
+                return values.SelectMany(v => StripStylePrefix(v, name, style).Split(explode ? '.' : ','));
+            case ParameterStyle.Matrix:
+                if (explode)
+                {
+                    // ;id=1;id=2
+                    var prefix = $";{name}=";
+                    return values.SelectMany(v => v.Split(prefix, StringSplitOptions.RemoveEmptyEntries));
+                }
+                return values.SelectMany(v => StripStylePrefix(v, name, style).Split(','));
+            case ParameterStyle.Simple:
+            default:
+                return values.SelectMany(v => v.Split(',').Select(i => i.Trim()));
+        }
+    }
+
+    private static string StripStylePrefix(string value, string name, ParameterStyle style) => style switch
+    {
+        ParameterStyle.Label when value.StartsWith('.') => value[1..],
+        ParameterStyle.Matrix when value.StartsWith($";{name}=", StringComparison.Ordinal) => value[(name.Length + 2)..],
+        ParameterStyle.Matrix when value == $";{name}" => string.Empty,
+        _ => value
+    };
 
     private static JsonValue? CoercePrimitive(string value, IOpenApiSchema? schema)
     {
@@ -86,7 +133,8 @@ internal static class OpenApiSchemaValidator
             return JsonValue.Create(l);
         }
         if (type.Value.HasFlag(JsonSchemaType.Number) &&
-            double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var d))
+            double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) &&
+            double.IsFinite(d))
         {
             return JsonValue.Create(d);
         }
@@ -110,8 +158,13 @@ internal static class OpenApiSchemaValidator
         List<SchemaValidationError> errors,
         int depth)
     {
-        if (schema is null || depth > MaxDepth)
+        if (schema is null)
         {
+            return;
+        }
+        if (depth > MaxDepth)
+        {
+            errors.Add(new(path, $"Schema is nested deeper than the supported maximum of {MaxDepth} levels, so the value couldn't be validated"));
             return;
         }
 

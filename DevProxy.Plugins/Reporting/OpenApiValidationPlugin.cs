@@ -275,13 +275,17 @@ public sealed class OpenApiValidationPlugin(
     private OperationMatch? FindOperation(IHttpRequest request)
     {
         var requestUrl = request.RequestUri.GetLeftPart(UriPartial.Path);
+        var method = new HttpMethod(request.Method);
+        OperationMatch? firstPathMatch = null;
         OperationMatch? firstServerMatch = null;
 
+        // prefer a spec that documents the requested method; fall back to
+        // a matching path without the method, and then to a matching server
         foreach (var spec in _specs)
         {
-            foreach (var serverRegex in spec.ServerRegexes)
+            foreach (var server in spec.Servers)
             {
-                var serverMatch = serverRegex.Match(requestUrl);
+                var serverMatch = server.Regex.Match(requestUrl);
                 if (!serverMatch.Success)
                 {
                     continue;
@@ -298,28 +302,32 @@ public sealed class OpenApiValidationPlugin(
                     relativePath = "/";
                 }
 
-                var pathMatch = FindPath(spec, relativePath);
-                if (pathMatch is null)
+                var matchedAnyPath = false;
+                foreach (var (path, pathValues) in FindPaths(server, relativePath))
                 {
-                    firstServerMatch ??= new OperationMatch(spec, relativePath, null, null, null, []);
-                    continue;
+                    matchedAnyPath = true;
+                    if (path.Operations.TryGetValue(method, out var operation))
+                    {
+                        return new OperationMatch(spec, relativePath, path.Template, path.PathItem, operation, pathValues);
+                    }
+                    firstPathMatch ??= new OperationMatch(spec, relativePath, path.Template, path.PathItem, null, pathValues);
                 }
 
-                var (template, pathItem, pathValues) = pathMatch.Value;
-                OpenApiOperation? operation = null;
-                _ = pathItem.Operations?.TryGetValue(new HttpMethod(request.Method), out operation);
-                return new OperationMatch(spec, relativePath, template, pathItem, operation, pathValues);
+                if (!matchedAnyPath)
+                {
+                    firstServerMatch ??= new OperationMatch(spec, relativePath, null, null, null, []);
+                }
             }
         }
 
-        return firstServerMatch;
+        return firstPathMatch ?? firstServerMatch;
     }
 
-    private static (string Template, IOpenApiPathItem PathItem, Dictionary<string, string> PathValues)? FindPath(LoadedSpec spec, string relativePath)
+    private static IEnumerable<(CompiledPath Path, Dictionary<string, string> PathValues)> FindPaths(ServerScope server, string relativePath)
     {
-        // prefer literal paths over templated paths (e.g. /users/me over /users/{id}),
-        // and among templated paths, those with fewer parameters
-        foreach (var path in spec.Paths)
+        // paths are ordered so that literal paths are preferred over templated paths
+        // (e.g. /users/me over /users/{id}), and among templated paths, those with fewer parameters
+        foreach (var path in server.Paths)
         {
             var m = path.Regex.Match(relativePath);
             if (!m.Success)
@@ -332,10 +340,8 @@ public sealed class OpenApiValidationPlugin(
             {
                 values[path.ParameterNames[i]] = Uri.UnescapeDataString(m.Groups[i + 1].Value);
             }
-            return (path.Template, path.PathItem, values);
+            yield return (path, values);
         }
-
-        return null;
     }
 
     private static void ValidateParameters(IHttpRequest request, OperationMatch match, List<OpenApiValidationIssue> issues)
@@ -363,6 +369,12 @@ public sealed class OpenApiValidationPlugin(
                     if (query.TryGetValue(parameter.Name, out var queryValues))
                     {
                         values = queryValues;
+                    }
+                    else if (parameter.Style == ParameterStyle.DeepObject &&
+                        query.Keys.Any(k => k.StartsWith($"{parameter.Name}[", StringComparison.Ordinal)))
+                    {
+                        // deepObject values (e.g. filter[name]=value) aren't validated
+                        continue;
                     }
                     break;
                 case ParameterLocation.Header:
@@ -397,6 +409,7 @@ public sealed class OpenApiValidationPlugin(
             }
 
             ValidateParameterValue(parameter.Name, $"{locationName} parameter", values, parameter.Schema,
+                parameter.Style ?? GetDefaultStyle(parameter.In.Value), parameter.Explode,
                 OpenApiValidationIssueLocation.Request, issues);
         }
 
@@ -429,15 +442,21 @@ public sealed class OpenApiValidationPlugin(
         }
     }
 
+    private static ParameterStyle GetDefaultStyle(ParameterLocation location) => location switch
+    {
+        ParameterLocation.Query or ParameterLocation.Cookie => ParameterStyle.Form,
+        _ => ParameterStyle.Simple
+    };
+
     private static void ValidateParameterValue(string name, string kind, List<string> values, IOpenApiSchema? schema,
-        OpenApiValidationIssueLocation location, List<OpenApiValidationIssue> issues)
+        ParameterStyle style, bool explode, OpenApiValidationIssueLocation location, List<OpenApiValidationIssue> issues)
     {
         if (schema is null || schema.Type == JsonSchemaType.Object)
         {
             return;
         }
 
-        var value = OpenApiSchemaValidator.CoerceParameterValue(values, schema);
+        var value = OpenApiSchemaValidator.CoerceParameterValue(values, schema, name, style, explode);
         var direction = location == OpenApiValidationIssueLocation.Request
             ? SchemaValidationDirection.Request
             : SchemaValidationDirection.Response;
@@ -529,6 +548,7 @@ public sealed class OpenApiValidationPlugin(
             }
 
             ValidateParameterValue(headerName, "response header", values, header.Schema,
+                header.Style ?? ParameterStyle.Simple, header.Explode,
                 OpenApiValidationIssueLocation.Response, issues);
         }
 
@@ -745,36 +765,108 @@ public sealed class OpenApiValidationPlugin(
                 continue;
             }
 
-            var serverRegexes = new List<Regex>();
-            foreach (var server in document.Servers ?? [])
-            {
-                if (string.IsNullOrWhiteSpace(server.Url) ||
-                    !server.Url.Contains("://", StringComparison.Ordinal))
-                {
-                    Logger.LogDebug("Skipping server '{ServerUrl}' in '{File}' because it isn't an absolute URL", server.Url, file);
-                    continue;
-                }
-
-                var pattern = Regex.Replace(Regex.Escape(server.Url.TrimEnd('/')), @"\\\{[^}]+\}", "[^/]*");
-                serverRegexes.Add(new Regex($"^{pattern}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
-            }
-
-            if (serverRegexes.Count == 0)
+            var servers = BuildServerScopes(document, file);
+            if (servers.Count == 0)
             {
                 Logger.LogWarning("OpenAPI spec '{File}' doesn't define any absolute server URLs. Skipping", file);
                 continue;
             }
 
-            var paths = (document.Paths ?? [])
-                .Select(p => CompilePath(p.Key, p.Value))
-                .OrderBy(p => p.ParameterNames.Count)
-                .ToList();
-
-            specs.Add(new LoadedSpec(file, document, serverRegexes, paths));
+            specs.Add(new LoadedSpec(file, servers));
             Logger.LogInformation("Loaded OpenAPI spec '{File}'", file);
         }
 
         return specs;
+    }
+
+    private List<ServerScope> BuildServerScopes(OpenApiDocument document, string file)
+    {
+        // each operation is served from its effective servers: operation-level
+        // servers override path-level servers, which override document-level servers
+        var scopes = new Dictionary<string, (Regex Regex, Dictionary<string, CompiledPath> Paths)>(StringComparer.Ordinal);
+        var skippedServers = new HashSet<string>(StringComparer.Ordinal);
+
+        (Regex Regex, Dictionary<string, CompiledPath> Paths)? GetScope(string? url)
+        {
+            if (string.IsNullOrWhiteSpace(url) || !url.Contains("://", StringComparison.Ordinal))
+            {
+                if (skippedServers.Add(url ?? string.Empty))
+                {
+                    Logger.LogDebug("Skipping server '{ServerUrl}' in '{File}' because it isn't an absolute URL", url, file);
+                }
+                return null;
+            }
+
+            var key = url.TrimEnd('/');
+            if (!scopes.TryGetValue(key, out var scope))
+            {
+                scope = (CompileServerUrl(key), new(StringComparer.Ordinal));
+                scopes[key] = scope;
+            }
+            return scope;
+        }
+
+        foreach (var (template, pathItem) in document.Paths ?? [])
+        {
+            var pathServers = pathItem.Servers is { Count: > 0 } ? pathItem.Servers : document.Servers ?? [];
+
+            // register the path for its servers even if it has no operations
+            // there, so that requests with undocumented methods are reported
+            foreach (var server in pathServers)
+            {
+                if (GetScope(server.Url) is { } scope)
+                {
+                    GetOrAddPath(scope.Paths, template, pathItem);
+                }
+            }
+
+            foreach (var (method, operation) in pathItem.Operations ?? new Dictionary<HttpMethod, OpenApiOperation>())
+            {
+                var operationServers = operation.Servers is { Count: > 0 } ? operation.Servers : pathServers;
+                foreach (var server in operationServers)
+                {
+                    if (GetScope(server.Url) is { } scope)
+                    {
+                        GetOrAddPath(scope.Paths, template, pathItem).Operations[method] = operation;
+                    }
+                }
+            }
+        }
+
+        // servers without paths still need to be matched so that requests
+        // to undocumented paths are reported
+        foreach (var server in document.Servers ?? [])
+        {
+            _ = GetScope(server.Url);
+        }
+
+        return [.. scopes.Values.Select(s => new ServerScope(
+            s.Regex,
+            [.. s.Paths.Values.OrderBy(p => p.ParameterNames.Count)]))];
+    }
+
+    private static CompiledPath GetOrAddPath(Dictionary<string, CompiledPath> paths, string template, IOpenApiPathItem pathItem)
+    {
+        if (!paths.TryGetValue(template, out var path))
+        {
+            path = CompilePath(template, pathItem);
+            paths[template] = path;
+        }
+        return path;
+    }
+
+    private static Regex CompileServerUrl(string url)
+    {
+        // scheme and host are case-insensitive, but the base path is case-sensitive
+        var authorityStart = url.IndexOf("://", StringComparison.Ordinal) + 3;
+        var pathStart = url.IndexOf('/', authorityStart);
+        var origin = pathStart < 0 ? url : url[..pathStart];
+        var basePath = pathStart < 0 ? string.Empty : url[pathStart..];
+
+        static string ToPattern(string value) =>
+            Regex.Replace(Regex.Escape(value), @"\\\{[^}]+\}", "[^/]*");
+
+        return new Regex($"^(?i:{ToPattern(origin)}){ToPattern(basePath)}", RegexOptions.CultureInvariant);
     }
 
     private static CompiledPath CompilePath(string template, IOpenApiPathItem pathItem)
@@ -785,13 +877,20 @@ public sealed class OpenApiValidationPlugin(
             parameterNames.Add(Regex.Unescape(m.Groups[1].Value));
             return "([^/]+)";
         });
-        var regex = new Regex($"^{pattern}/?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        return new CompiledPath(template, pathItem, regex, parameterNames);
+        var regex = new Regex($"^{pattern}$", RegexOptions.CultureInvariant);
+        return new CompiledPath(template, pathItem, regex, parameterNames, []);
     }
 
-    private sealed record CompiledPath(string Template, IOpenApiPathItem PathItem, Regex Regex, List<string> ParameterNames);
+    private sealed record CompiledPath(
+        string Template,
+        IOpenApiPathItem PathItem,
+        Regex Regex,
+        List<string> ParameterNames,
+        Dictionary<HttpMethod, OpenApiOperation> Operations);
 
-    private sealed record LoadedSpec(string FilePath, OpenApiDocument Document, List<Regex> ServerRegexes, List<CompiledPath> Paths);
+    private sealed record ServerScope(Regex Regex, List<CompiledPath> Paths);
+
+    private sealed record LoadedSpec(string FilePath, List<ServerScope> Servers);
 
     private sealed record OperationMatch(
         LoadedSpec Spec,
