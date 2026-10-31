@@ -23,6 +23,10 @@ internal static class StateManager
 
     private static readonly string _configFolder = ResolveConfigFolder();
 
+    // Some platforms (e.g. Linux) derive the process start time from the boot
+    // time, which can yield slightly different values between reads.
+    private static readonly TimeSpan _startTimeTolerance = TimeSpan.FromSeconds(1);
+
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
         WriteIndented = true
@@ -225,7 +229,7 @@ internal static class StateManager
             var state = await ReadStateFromFileAsync(filePath, cancellationToken);
             if (state is not null &&
                 state.AsSystemProxy &&
-                !IsProcessRunning(state.Pid) &&
+                !IsInstanceAlive(state) &&
                 seenPids.Add(state.Pid))
             {
                 orphaned.Add(state);
@@ -286,13 +290,81 @@ internal static class StateManager
     }
 
     /// <summary>
+    /// Gets the start time (UTC) of the current process, or null if it can't be determined.
+    /// </summary>
+    public static DateTimeOffset? GetCurrentProcessStartTime()
+    {
+        using var process = Process.GetCurrentProcess();
+        return GetProcessStartTime(process);
+    }
+
+    /// <summary>
+    /// Checks whether the instance described by <paramref name="state"/> is still running.
+    /// Besides the PID, compares the recorded process start time (when available)
+    /// so that a PID recycled by the OS for an unrelated process isn't mistaken
+    /// for the original instance.
+    /// </summary>
+    internal static bool IsInstanceAlive(ProxyInstanceState state)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(state.Pid);
+            return !process.HasExited && IsSameProcess(process, state);
+        }
+        catch (ArgumentException)
+        {
+            // Process doesn't exist
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            // Process has exited
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Checks whether <paramref name="process"/> is the process recorded in
+    /// <paramref name="state"/>, by comparing start times. Returns true when the
+    /// state has no recorded start time (written by an older version) or the
+    /// process start time can't be read, preserving PID-only behavior.
+    /// </summary>
+    internal static bool IsSameProcess(Process process, ProxyInstanceState state)
+    {
+        if (state.ProcessStartTime is not { } recorded)
+        {
+            return true;
+        }
+
+        var actual = GetProcessStartTime(process);
+        if (actual is null)
+        {
+            return true;
+        }
+
+        return (actual.Value - recorded).Duration() <= _startTimeTolerance;
+    }
+
+    private static DateTimeOffset? GetProcessStartTime(Process process)
+    {
+        try
+        {
+            return new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Checks if a process with the given PID is running.
     /// </summary>
     private static bool IsProcessRunning(int pid)
     {
         try
         {
-            var process = Process.GetProcessById(pid);
+            using var process = Process.GetProcessById(pid);
             return !process.HasExited;
         }
         catch (ArgumentException)
@@ -323,8 +395,9 @@ internal static class StateManager
             return null;
         }
 
-        // Verify the process is still running
-        if (!IsProcessRunning(state.Pid))
+        // Verify the process is still running and wasn't replaced by
+        // an unrelated process that reused the PID
+        if (!IsInstanceAlive(state))
         {
             // Clean up stale state file
             DeleteFile(filePath);

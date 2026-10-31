@@ -129,38 +129,15 @@ internal sealed class StopCommand : Command
 
                 // Wait for process to exit
                 var stopwatch = Stopwatch.StartNew();
-                while (stopwatch.Elapsed < TimeSpan.FromSeconds(10))
+                while (stopwatch.Elapsed < TimeSpan.FromSeconds(10) &&
+                    StateManager.IsInstanceAlive(state))
                 {
-                    try
-                    {
-                        var process = Process.GetProcessById(state.Pid);
-                        if (process.HasExited)
-                        {
-                            break;
-                        }
-                    }
-                    catch (ArgumentException)
-                    {
-                        // Process has exited
-                        break;
-                    }
-
                     await Task.Delay(200, cancellationToken);
                 }
 
-                // Verify the process actually exited before cleaning up state
-                var exited = false;
-                try
-                {
-                    var proc = Process.GetProcessById(state.Pid);
-                    exited = proc.HasExited;
-                }
-                catch (ArgumentException)
-                {
-                    exited = true;
-                }
-
-                if (!exited)
+                // Verify the process actually exited before cleaning up state.
+                // A PID reused by an unrelated process counts as exited.
+                if (StateManager.IsInstanceAlive(state))
                 {
                     Console.WriteLine($"Dev Proxy (PID: {state.Pid}) did not stop in time.");
                     Console.WriteLine($"Use --force --pid {state.Pid} to forcefully terminate the process.");
@@ -201,10 +178,17 @@ internal sealed class StopCommand : Command
 
         try
         {
-            var process = Process.GetProcessById(state.Pid);
-            process.Kill();
-
-            Console.WriteLine($"Forcefully terminated Dev Proxy (PID: {state.Pid}).");
+            using var process = Process.GetProcessById(state.Pid);
+            // Never kill an unrelated process that reused the PID.
+            if (!StateManager.IsSameProcess(process, state))
+            {
+                Console.WriteLine("Dev Proxy process not found (already stopped).");
+            }
+            else
+            {
+                process.Kill();
+                Console.WriteLine($"Forcefully terminated Dev Proxy (PID: {state.Pid}).");
+            }
         }
         catch (ArgumentException)
         {
