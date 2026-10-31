@@ -71,6 +71,28 @@ public static partial class EnvironmentVariablePlaceholders
         return PlaceholderRegex().Replace(value, match => ResolveMatch(match, lookup, unresolvedVariables));
     }
 
+    /// <summary>
+    /// Applies a transformation to the text outside placeholders, leaving placeholders
+    /// (including escaped ones) unchanged.
+    /// </summary>
+    public static string TransformOutsidePlaceholders(string value, Func<string, string> transformText)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(transformText);
+
+        var result = new StringBuilder();
+        var position = 0;
+        foreach (Match match in PlaceholderRegex().Matches(value))
+        {
+            _ = result
+                .Append(transformText(value[position..match.Index]))
+                .Append(match.Value);
+            position = match.Index + match.Length;
+        }
+        _ = result.Append(transformText(value[position..]));
+        return result.ToString();
+    }
+
     private static string ResolveWithTextTransform(string value, Func<string, string?> lookup, ICollection<string>? unresolvedVariables, Func<string, string> transformText)
     {
         var result = new StringBuilder();

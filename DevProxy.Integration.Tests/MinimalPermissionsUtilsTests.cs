@@ -60,6 +60,27 @@ public sealed class MinimalPermissionsUtilsTests : IDisposable
     }
 
     [Fact]
+    public void ResolveApiSpecVariables_Yaml_ResolvesUnquotedLegacyVariables()
+    {
+        var yaml = """
+        servers:
+          - url: {BASE_URL}
+        escaped: $${BASE_URL}
+        """;
+        var logger = new WarningLogger();
+
+        var result = MinimalPermissionsUtils.ResolveApiSpecVariables(yaml, "spec.yaml", new() { ["BASE_URL"] = "https://api.contoso.com" }, logger);
+
+        var stream = new YamlStream();
+        stream.Load(new StringReader(result));
+        var root = (YamlMappingNode)stream.Documents[0].RootNode;
+        var server = (YamlMappingNode)((YamlSequenceNode)root["servers"])[0];
+        Assert.Equal("https://api.contoso.com", Assert.IsType<YamlScalarNode>(server["url"]).Value);
+        Assert.Equal("${BASE_URL}", root["escaped"].ToString());
+        _ = Assert.Single(logger.Warnings, w => w.Contains("deprecated", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void ResolveApiSpecVariables_EscapedPlaceholderOnly_NoDeprecationWarning()
     {
         var logger = new WarningLogger();

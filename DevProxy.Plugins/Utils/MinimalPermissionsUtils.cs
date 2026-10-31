@@ -36,9 +36,19 @@ static class MinimalPermissionsUtils
         {
             // resolve values in the parsed document so that values with quotes don't break it
             // and keys aren't changed
-            resolved = Path.GetExtension(filePath).Equals(".json", StringComparison.OrdinalIgnoreCase)
-                ? EnvironmentVariablePlaceholders.ResolveInJson(fileContents, Environment.GetEnvironmentVariable, unresolvedVariables, transformText)
-                : EnvironmentVariablePlaceholders.ResolveInYaml(fileContents, Environment.GetEnvironmentVariable, unresolvedVariables, transformText);
+            if (Path.GetExtension(filePath).Equals(".json", StringComparison.OrdinalIgnoreCase))
+            {
+                resolved = EnvironmentVariablePlaceholders.ResolveInJson(fileContents, Environment.GetEnvironmentVariable, unresolvedVariables, transformText);
+            }
+            else
+            {
+                // unquoted legacy values like `url: {NAME}` parse as YAML flow mappings,
+                // so replace legacy variables in the raw text first, like before
+                var withLegacyVariables = transformText is null
+                    ? fileContents
+                    : EnvironmentVariablePlaceholders.TransformOutsidePlaceholders(fileContents, transformText);
+                resolved = EnvironmentVariablePlaceholders.ResolveInYaml(withLegacyVariables, Environment.GetEnvironmentVariable, unresolvedVariables);
+            }
         }
         catch (Exception ex) when (ex is JsonException or YamlException)
         {

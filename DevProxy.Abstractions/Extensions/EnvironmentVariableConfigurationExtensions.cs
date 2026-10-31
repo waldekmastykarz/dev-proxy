@@ -131,9 +131,11 @@ public static class ConfigurationPlaceholderResolver
             return envSection.TryGetValue(name, out value) ? value : Environment.GetEnvironmentVariable(name);
         }
 
+        var rewriteRulePrefixes = GetRewriteRulePrefixes(data);
         foreach (var key in data.Keys.ToArray())
         {
-            if (IsEnvSectionVariable(key))
+            if (IsEnvSectionVariable(key) ||
+                rewriteRulePrefixes.Any(p => key.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
             {
                 continue;
             }
@@ -146,6 +148,25 @@ public static class ConfigurationPlaceholderResolver
         }
 
         return unresolved;
+    }
+
+    // RewritePlugin rules use ${name} for regex named groups and resolve ${env:NAME}
+    // per request, so inline rules are excluded from load-time resolution
+    private static string[] GetRewriteRulePrefixes(IDictionary<string, string?> data)
+    {
+        const string pluginsPrefix = "plugins:";
+        const string nameSuffix = ":name";
+        const string rewritePluginName = "RewritePlugin";
+
+        return [.. data
+            .Where(e =>
+                e.Key.StartsWith(pluginsPrefix, StringComparison.OrdinalIgnoreCase) &&
+                e.Key.EndsWith(nameSuffix, StringComparison.OrdinalIgnoreCase) &&
+                e.Key.Count(c => c == ':') == 2 &&
+                string.Equals(e.Value, rewritePluginName, StringComparison.Ordinal))
+            .Select(e => data.TryGetValue($"{e.Key[..^nameSuffix.Length]}:configSection", out var section) ? section : null)
+            .Where(section => !string.IsNullOrEmpty(section))
+            .Select(section => $"{section}:rewrites:")];
     }
 
     private static bool IsEnvSectionVariable(string key) =>
