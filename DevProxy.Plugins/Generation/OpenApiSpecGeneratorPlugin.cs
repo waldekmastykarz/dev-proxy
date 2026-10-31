@@ -561,7 +561,9 @@ public sealed class OpenApiSpecGeneratorPlugin(
         if (detectedAuth is null)
         {
             var statusCode = (int)(session.Response?.StatusCode ?? 0);
-            if (statusCode is >= 200 and < 300)
+            // cookies aren't detected as auth, but might authenticate the request
+            var hasCookie = session.Request.Headers.Any(h => h.Name.Equals("cookie", StringComparison.OrdinalIgnoreCase));
+            if (statusCode is >= 200 and < 300 && !hasCookie)
             {
                 _ = securityState.AnonymousOperations.Add(operation);
                 AddAnonymousSecurityRequirement(operation);

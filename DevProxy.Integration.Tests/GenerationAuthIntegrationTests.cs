@@ -271,6 +271,29 @@ public sealed class GenerationAuthIntegrationTests
     }
 
     [Fact]
+    public async Task OpenApiSpecGenerator_SuccessfulCookieCall_KeepsAuthRequired()
+    {
+        var doc = await GenerateOpenApiJsonAsync([
+            Exchange("https://api.contoso.com/users", ("Cookie", "session=abc")),
+            Exchange("https://api.contoso.com/users", ("x-api-key", "secret-value")),
+        ]);
+
+        var security = Operation(doc)["security"]!.AsArray();
+        Assert.NotNull(Assert.Single(security)!["ApiKeyAuth_header_x-api-key"]);
+    }
+
+    [Fact]
+    public async Task OpenApiSpecGenerator_UnderscoreApiKeyQueryParameter_EmitsApiKeyScheme()
+    {
+        var doc = await GenerateOpenApiJsonAsync([Exchange("https://api.contoso.com/users?api_key=secret-value")]);
+
+        var scheme = SecurityScheme(doc, "ApiKeyAuth_query_api_key");
+        Assert.Equal("apiKey", scheme["type"]!.GetValue<string>());
+        Assert.Equal("query", scheme["in"]!.GetValue<string>());
+        Assert.Equal("api_key", scheme["name"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task OpenApiSpecGenerator_FailedAnonymousCall_KeepsAuthRequired()
     {
         var doc = await GenerateOpenApiJsonAsync([

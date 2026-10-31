@@ -221,6 +221,7 @@ internal static class Http
     [
         "access-token",
         "api-key",
+        "api_key",
         "auth-token",
         "authorization",
         "authorization-token",
