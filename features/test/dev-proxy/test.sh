@@ -27,4 +27,5 @@ check "start Dev Proxy" devproxy_start
 check "curl trusts Dev Proxy" devproxy_curl
 devproxy_stop
 
+check "CI audit: deliberate failure" false
 reportResults
