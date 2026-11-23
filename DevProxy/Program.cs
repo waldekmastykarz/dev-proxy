@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+#error CI audit: deliberate build failure
 using DevProxy;
 using DevProxy.Abstractions.Utils;
 using DevProxy.Commands;

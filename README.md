@@ -92,3 +92,5 @@ Then, run your app as usual. It keeps calling the real API URLs, and Dev Proxy s
 ## .NET Foundation
 
 This project is supported by the [.NET Foundation](https://dotnetfoundation.org).
+
+<!-- CI audit: deliberate change -->
