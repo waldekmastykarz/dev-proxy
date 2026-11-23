@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 
 namespace DevProxy.Plugins.Utils;
 
-#pragma warning disable CA5350, CA5351, CA5385, CA1812, CA1859
+#pragma warning disable CA2000, CA5350, CA5351, CA5385, CA1812, CA1859
 public static class CiAuditCodeQLProbe
 {
     public static byte[] Encrypt(byte[] data)
@@ -19,4 +19,4 @@ public static class CiAuditCodeQLProbe
         return rsa.SignData(data, SHA1.Create());
     }
 }
-#pragma warning restore CA5350, CA5351, CA5385, CA1812, CA1859
+#pragma warning restore CA2000, CA5350, CA5351, CA5385, CA1812, CA1859
